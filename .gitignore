@@ -1,0 +1,17 @@
+.env.local
+.env.*.local
+*.zip
+node_modules/
+dist/
+dist-installer/
+releases/
+tmp/
+data/
+build/
+_db-migration/
+supabase/.temp/
+telegram_excel_bot/.env
+telegram_excel_bot/__pycache__/
+android/.gradle/
+android/**/build/
+android/app/src/main/assets/public/

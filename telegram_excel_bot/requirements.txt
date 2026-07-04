@@ -1,0 +1,6 @@
+pandas
+openpyxl
+python-dotenv
+apscheduler
+python-telegram-bot[httpx]
+pywin32

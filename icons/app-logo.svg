@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Glass Orders G.O">
+  <defs>
+    <linearGradient id="steel" x1="74" y1="88" x2="428" y2="424" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fbfbf7"/>
+      <stop offset=".16" stop-color="#a9a9a3"/>
+      <stop offset=".34" stop-color="#f1e5cf"/>
+      <stop offset=".55" stop-color="#6d706d"/>
+      <stop offset=".76" stop-color="#e7e2d6"/>
+      <stop offset="1" stop-color="#5a5f61"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="68" x2="0" y2="438" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff0b2"/>
+      <stop offset=".35" stop-color="#d9ac55"/>
+      <stop offset=".72" stop-color="#77531c"/>
+      <stop offset="1" stop-color="#ffe6a1"/>
+    </linearGradient>
+    <radialGradient id="glass" cx="63%" cy="36%" r="65%">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".86"/>
+      <stop offset=".2" stop-color="#aef3ff" stop-opacity=".62"/>
+      <stop offset=".45" stop-color="#8fb8d4" stop-opacity=".36"/>
+      <stop offset=".72" stop-color="#2f4351" stop-opacity=".3"/>
+      <stop offset="1" stop-color="#111820" stop-opacity=".82"/>
+    </radialGradient>
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#000" flood-opacity=".58"/>
+    </filter>
+    <filter id="innerGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="bevel">
+      <path d="M92 52h328l40 40v328l-40 40H92l-40-40V92z"/>
+    </clipPath>
+  </defs>
+  <path d="M92 52h328l40 40v328l-40 40H92l-40-40V92z" fill="#0a0d10"/>
+  <g clip-path="url(#bevel)">
+    <rect width="512" height="512" fill="#1b1d1d"/>
+    <path d="M0 0h512v512H0z" fill="url(#gold)" opacity=".18"/>
+    <g opacity=".17" stroke="#eef4f8" stroke-width="1">
+      <path d="M-30 132C98 96 214 104 547 42"/>
+      <path d="M-40 177C140 130 270 158 548 86"/>
+      <path d="M-20 222C152 192 322 206 532 151"/>
+      <path d="M-40 271C158 254 322 274 532 217"/>
+      <path d="M-32 326C178 318 342 330 538 275"/>
+      <path d="M-46 382C164 378 330 390 556 334"/>
+    </g>
+    <path d="M92 52h328l40 40v328l-40 40H92l-40-40V92z" fill="none" stroke="#f7dfaa" stroke-width="8" opacity=".56"/>
+    <path d="M58 92h396M58 420h396" stroke="#ffffff" stroke-opacity=".22" stroke-width="5"/>
+  </g>
+  <g filter="url(#softShadow)">
+    <circle cx="299" cy="255" r="132" fill="url(#glass)" stroke="#dff7ff" stroke-width="10"/>
+    <circle cx="299" cy="255" r="96" fill="none" stroke="#88d8f0" stroke-width="15" stroke-opacity=".44"/>
+    <path d="M213 154 378 318M224 349 387 185M181 254h235M299 123v265" stroke="#ffffff" stroke-opacity=".2" stroke-width="8"/>
+    <path d="M407 184c34 43 37 103 8 150" fill="none" stroke="#ffffff" stroke-width="14" stroke-opacity=".55" stroke-linecap="round"/>
+    <path d="M364 133c-55-31-129-20-174 29-55 60-52 153 8 209 55 51 139 55 199 10l-54-62c-26 17-63 14-86-8-29-28-31-74-5-104 25-28 69-36 102-16z" fill="url(#steel)" stroke="#0d1116" stroke-width="7"/>
+    <path d="M231 253h129v74h-65v-39h-64z" fill="url(#steel)" stroke="#0d1116" stroke-width="7"/>
+    <path d="M370 323c23-25 34-55 32-90" fill="none" stroke="#f7dfaa" stroke-width="7" stroke-opacity=".7" stroke-linecap="round"/>
+  </g>
+  <text x="362" y="284" text-anchor="middle" font-family="Times New Roman, Times, serif" font-size="40" font-weight="700" fill="#edf3f7" stroke="#101820" stroke-width="2" filter="url(#innerGlow)">G.O</text>
+  <text x="256" y="442" text-anchor="middle" font-family="Times New Roman, Times, serif" font-size="42" font-weight="700" fill="url(#gold)" stroke="#101010" stroke-width="2">G.O By Y.D</text>
+</svg>

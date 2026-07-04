@@ -1,0 +1,90 @@
+{
+  "name": "glass-orders",
+  "version": "0.1.0",
+  "description": "Glass Orders, Suppliers management And Glass Cost.",
+  "author": "Yasser Diab",
+  "private": true,
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5174",
+    "local:server": "node server/index.mjs",
+    "build:web": "vite build --emptyOutDir",
+    "dist:win": "npm run build:web && electron-builder --win nsis",
+    "android:add": "cap add android",
+    "android:sync": "npm run build:web && cap sync android",
+    "android:debug": "npm run android:sync && cd android && gradlew.bat assembleDebug",
+    "android:release": "npm run android:sync && powershell -ExecutionPolicy Bypass -File scripts/build_android_release.ps1",
+    "package:release": "powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.4.3",
+    "@capacitor/core": "^7.4.3",
+    "@capacitor/filesystem": "^7.1.8",
+    "@supabase/server": "^1.2.0",
+    "@supabase/ssr": "^0.12.0",
+    "@supabase/supabase-js": "^2.110.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^3.0.4",
+    "lucide-react": "^0.561.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "vite": "^7.2.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.3",
+    "@electric-sql/pglite": "^0.5.3",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.1.0",
+    "pg": "^8.22.0"
+  },
+  "build": {
+    "appId": "com.hgad.glassorders",
+    "productName": "Glass Orders",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "asarUnpack": [
+      "server/**/*",
+      "telegram_excel_bot/**/*",
+      "طلب شراء زجاج.xlsm"
+    ],
+    "directories": {
+      "output": "dist-installer"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "server/**/*",
+      "telegram_excel_bot/**/*",
+      "icons/**/*",
+      "app_logo.png",
+      "طلب شراء زجاج.xlsm",
+      "supabase/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "icons/app-icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "GlassOrders-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "perMachine": false,
+      "allowElevation": false
+    }
+  }
+}

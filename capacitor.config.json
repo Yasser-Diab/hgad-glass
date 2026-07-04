@@ -1,0 +1,8 @@
+{
+  "appId": "com.hgad.glassorders",
+  "appName": "Glass Orders",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
