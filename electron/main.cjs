@@ -12,10 +12,19 @@ let tray = null;
 let isQuitting = false;
 
 const root = path.join(__dirname, "..");
+const BOT_BACKGROUND_ARG = "--glass-orders-background-bot";
+const DEFAULT_BOT_SETTINGS = {
+  enabled: false,
+  openAtLogin: false,
+  startHiddenAtLogin: true,
+  supabaseUrl: "",
+  supabaseKey: ""
+};
 const appIconPath = path.join(root, "app_logo.png");
 const windowStatePath = path.join(app.getPath("userData"), "window-state.json");
 const offlineQueuePath = path.join(app.getPath("userData"), "offline-queue.json");
 const offlineSnapshotPath = path.join(app.getPath("userData"), "offline-snapshot.json");
+const botSettingsPath = path.join(app.getPath("userData"), "telegram-bot-settings.json");
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -32,6 +41,7 @@ function bundledRoot() {
 
 function helperScriptPath(...segments) {
   return firstExisting([
+    app.isPackaged ? path.join(process.resourcesPath, ...segments) : "",
     app.isPackaged ? path.join(process.resourcesPath, "app.asar.unpacked", ...segments) : "",
     app.isPackaged ? path.join(process.resourcesPath, "app.asar", ...segments) : "",
     path.join(root, ...segments)
@@ -41,10 +51,20 @@ function helperScriptPath(...segments) {
 function botAssetsDir() {
   return firstExisting([
     process.env.GLASS_ORDERS_BOT_DIR,
+    app.isPackaged ? path.join(process.resourcesPath, "telegram_excel_bot") : "",
     app.isPackaged ? path.join(process.resourcesPath, "app.asar.unpacked", "telegram_excel_bot") : "",
     app.isPackaged ? path.join(process.resourcesPath, "app.asar", "telegram_excel_bot") : "",
     path.join(root, "telegram_excel_bot")
   ]);
+}
+
+function botNodePaths() {
+  return [
+    app.isPackaged ? path.join(process.resourcesPath, "node_modules") : "",
+    app.isPackaged ? path.join(process.resourcesPath, "app.asar.unpacked", "node_modules") : "",
+    app.isPackaged ? path.join(process.resourcesPath, "app.asar", "node_modules") : "",
+    path.join(root, "node_modules")
+  ].filter((candidate) => candidate && fs.existsSync(candidate));
 }
 
 function processWorkingRoot() {
@@ -67,9 +87,12 @@ function currentExecutablePath() {
 function packagedWorkbookPath() {
   return firstExisting([
     process.env.GLASS_ORDERS_WORKBOOK_PATH,
+    app.isPackaged ? path.join(process.resourcesPath, "طلب شراء زجاج.xlsm") : "",
+    app.isPackaged ? path.join(process.resourcesPath, "telegram_excel_bot", "طلب شراء زجاج.xlsm") : "",
     app.isPackaged ? path.join(path.dirname(process.resourcesPath), "طلب شراء زجاج.xlsm") : "",
     path.join(path.dirname(currentExecutablePath()), "طلب شراء زجاج.xlsm"),
     path.join(helperRoot(), "طلب شراء زجاج.xlsm"),
+    path.join(root, "telegram_excel_bot", "طلب شراء زجاج.xlsm"),
     path.join(root, "طلب شراء زجاج.xlsm")
   ]);
 }
@@ -119,6 +142,63 @@ function writeJsonFile(filePath, payload) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(payload || {}, null, 2), "utf8");
   return { ok: true, filePath };
+}
+
+function readBotSettings() {
+  try {
+    return normalizeBotSettings(JSON.parse(fs.readFileSync(botSettingsPath, "utf8")));
+  } catch {
+    return { ...DEFAULT_BOT_SETTINGS };
+  }
+}
+
+function normalizeBotSettings(settings = {}) {
+  return {
+    ...DEFAULT_BOT_SETTINGS,
+    enabled: settings.enabled === true,
+    openAtLogin: settings.openAtLogin === true,
+    startHiddenAtLogin: settings.startHiddenAtLogin !== false,
+    supabaseUrl: String(settings.supabaseUrl || ""),
+    supabaseKey: String(settings.supabaseKey || "")
+  };
+}
+
+function publicBotSettings(settings = readBotSettings()) {
+  const normalized = normalizeBotSettings(settings);
+  return {
+    enabled: normalized.enabled,
+    openAtLogin: normalized.openAtLogin,
+    startHiddenAtLogin: normalized.startHiddenAtLogin,
+    canOpenAtLogin: process.platform === "win32",
+    hasSupabase: !!(normalized.supabaseUrl && normalized.supabaseKey)
+  };
+}
+
+function applyBotLoginItemSettings(settings = readBotSettings()) {
+  if (process.platform !== "win32") return publicBotSettings(settings);
+  const normalized = normalizeBotSettings(settings);
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: normalized.openAtLogin,
+      path: currentExecutablePath(),
+      args: normalized.startHiddenAtLogin ? [BOT_BACKGROUND_ARG] : []
+    });
+  } catch (error) {
+    pushBotLog(`Windows startup setting failed: ${error.message}`);
+  }
+  return publicBotSettings(normalized);
+}
+
+function saveBotSettings(patch = {}) {
+  const current = readBotSettings();
+  const next = normalizeBotSettings({ ...current, ...patch, updatedAt: new Date().toISOString() });
+  writeJsonFile(botSettingsPath, next);
+  applyBotLoginItemSettings(next);
+  return next;
+}
+
+function shouldLaunchHidden() {
+  return process.argv.includes(BOT_BACKGROUND_ARG);
 }
 
 function pendingOfflineCount() {
@@ -218,20 +298,34 @@ function stopLocalServer() {
 }
 
 function botStatus() {
+  const settings = publicBotSettings();
   return {
     running: !!(telegramBotProcess && !telegramBotProcess.killed),
     pid: telegramBotProcess?.pid || null,
-    logs: telegramBotLogs
+    logs: telegramBotLogs,
+    settings
   };
 }
 
 async function startTelegramBot(options = {}) {
+  const currentSettings = readBotSettings();
+  const runSettings = normalizeBotSettings({
+    ...currentSettings,
+    supabaseUrl: options.supabaseUrl || currentSettings.supabaseUrl,
+    supabaseKey: options.supabaseKey || currentSettings.supabaseKey
+  });
+  if (options.remember) {
+    saveBotSettings({ ...runSettings, enabled: true });
+  }
   if (telegramBotProcess && !telegramBotProcess.killed) return botStatus();
   const script = helperScriptPath("server", "telegramBot.mjs");
   const runtime = currentExecutablePath();
   const scriptDir = botAssetsDir();
+  const nodePath = botNodePaths().join(path.delimiter);
   pushBotLog(`Starting Telegram bot: ${script}`);
   pushBotLog(`Using helper runtime ${runtime}`);
+  pushBotLog(`Using bot assets ${scriptDir}`);
+  if (nodePath) pushBotLog(`Using bot libraries ${nodePath}`);
   if (!fs.existsSync(script)) {
     pushBotLog(`Telegram bot script was not found: ${script}`);
     return botStatus();
@@ -251,11 +345,12 @@ async function startTelegramBot(options = {}) {
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
+        NODE_PATH: [nodePath, process.env.NODE_PATH || ""].filter(Boolean).join(path.delimiter),
         GLASS_ORDERS_BOT_DIR: scriptDir,
         GLASS_ORDERS_WORKBOOK_PATH: process.env.GLASS_ORDERS_WORKBOOK_PATH || packagedWorkbookPath(),
         EXCEL_FILE: process.env.EXCEL_FILE || packagedWorkbookPath(),
-        VITE_SUPABASE_URL: options.supabaseUrl || process.env.VITE_SUPABASE_URL || "",
-        VITE_SUPABASE_ANON_KEY: options.supabaseKey || process.env.VITE_SUPABASE_ANON_KEY || ""
+        VITE_SUPABASE_URL: runSettings.supabaseUrl || process.env.VITE_SUPABASE_URL || "",
+        VITE_SUPABASE_ANON_KEY: runSettings.supabaseKey || process.env.VITE_SUPABASE_ANON_KEY || ""
       }
     });
   } catch (error) {
@@ -276,7 +371,10 @@ async function startTelegramBot(options = {}) {
   return botStatus();
 }
 
-function stopTelegramBot() {
+function stopTelegramBot(options = {}) {
+  if (options.remember !== false) {
+    saveBotSettings({ enabled: false, openAtLogin: false });
+  }
   if (telegramBotProcess && !telegramBotProcess.killed) {
     pushBotLog("Stopping Telegram bot...");
     telegramBotProcess.kill();
@@ -284,12 +382,15 @@ function stopTelegramBot() {
   return botStatus();
 }
 
-function startTelegramBotFromMenu() {
-  startTelegramBot().catch((error) => pushBotLog(`Telegram bot failed to start: ${error.message}`));
+function startRememberedTelegramBot() {
+  const settings = readBotSettings();
+  applyBotLoginItemSettings(settings);
+  if (!settings.enabled) return;
+  startTelegramBot({ ...settings, remember: false }).catch((error) => pushBotLog(`Telegram bot failed to start: ${error.message}`));
 }
 
 function showWindow(target) {
-  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow({ show: true });
   if (!mainWindow) return;
   mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -310,8 +411,7 @@ function createTray() {
     { type: "separator" },
     { label: "Start local server", click: () => startLocalServer() },
     { label: "Stop local server", click: () => stopLocalServer() },
-    { label: "Start Telegram bot", click: () => startTelegramBotFromMenu() },
-    { label: "Stop Telegram bot", click: () => stopTelegramBot() },
+    { label: "Telegram bot settings", click: () => showWindow("settings") },
     { type: "separator" },
     { label: "Exit", click: () => requestExit() }
   ]));
@@ -337,8 +437,7 @@ function createApplicationMenu() {
       submenu: [
         { label: "Start local server", click: () => startLocalServer() },
         { label: "Stop local server", click: () => stopLocalServer() },
-        { label: "Start Telegram bot", click: () => startTelegramBotFromMenu() },
-        { label: "Stop Telegram bot", click: () => stopTelegramBot() },
+        { label: "Telegram bot settings", click: () => showWindow("settings") },
         { type: "separator" },
         { role: "reload", label: "Reload app" },
         { role: "toggleDevTools", label: "Developer tools" }
@@ -354,10 +453,11 @@ function createApplicationMenu() {
   Menu.setApplicationMenu(menu);
 }
 
-function createWindow() {
+function createWindow(options = {}) {
   const savedState = readWindowState();
   const bounds = savedState.bounds || {};
   const win = new BrowserWindow({
+    show: options.show !== false,
     width: bounds.width || 1440,
     height: bounds.height || 920,
     x: bounds.x,
@@ -404,13 +504,19 @@ function createWindow() {
 
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;
+  const hiddenLaunch = shouldLaunchHidden();
   app.setName("Glass Orders");
   createApplicationMenu();
-  createWindow();
+  createWindow({ show: !hiddenLaunch });
   createTray();
+  startRememberedTelegramBot();
 });
 
-app.on("second-instance", (_event, _commandLine, _workingDirectory) => {
+app.on("second-instance", (_event, commandLine, _workingDirectory) => {
+  if ((commandLine || []).includes(BOT_BACKGROUND_ARG)) {
+    startRememberedTelegramBot();
+    return;
+  }
   showWindow();
 });
 
@@ -418,8 +524,10 @@ ipcMain.handle("glass-orders:start-local-server", () => startLocalServer());
 ipcMain.handle("glass-orders:stop-local-server", () => stopLocalServer());
 ipcMain.handle("glass-orders:local-server-logs", () => localServerLogs);
 ipcMain.handle("glass-orders:start-telegram-bot", (_event, options = {}) => startTelegramBot(options));
-ipcMain.handle("glass-orders:stop-telegram-bot", () => stopTelegramBot());
+ipcMain.handle("glass-orders:stop-telegram-bot", (_event, options = {}) => stopTelegramBot(options));
 ipcMain.handle("glass-orders:telegram-bot-status", () => botStatus());
+ipcMain.handle("glass-orders:telegram-bot-settings", () => publicBotSettings());
+ipcMain.handle("glass-orders:update-telegram-bot-settings", (_event, patch = {}) => publicBotSettings(saveBotSettings(patch)));
 ipcMain.handle("glass-orders:write-offline-queue", (_event, payload = {}) => writeJsonFile(offlineQueuePath, payload));
 ipcMain.handle("glass-orders:write-offline-snapshot", (_event, payload = {}) => writeJsonFile(offlineSnapshotPath, payload));
 ipcMain.handle("glass-orders:save-file", async (_event, payload = {}) => {
@@ -455,6 +563,6 @@ app.on("before-quit", (event) => {
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  if (BrowserWindow.getAllWindows().length === 0) createWindow({ show: true });
   else showWindow();
 });

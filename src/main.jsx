@@ -6,6 +6,7 @@ import { jsPDF } from "jspdf";
 import * as XLSX from "xlsx";
 import {
   BadgeDollarSign,
+  ArrowDownToLine,
   BarChart3,
   Bot,
   Building2,
@@ -57,10 +58,24 @@ import appLogo from "../app_logo.png";
 import hgadReportLogo from "../icons/HGAD-Dark_sticker.png";
 import "./styles.css";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.5";
 const APP_NAME = "Glass Orders";
 const SUB_NAME = "Glass Orders, Suppliers management And Glass Cost";
 const BYLINE = "G.O By Y.D";
+const RELEASES_URL = "https://github.com/Yasser-Diab/hgad-glass/releases";
+const GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/Yasser-Diab/hgad-glass/releases/latest";
+const GITHUB_RELEASES_API = "https://api.github.com/repos/Yasser-Diab/hgad-glass/releases";
+const UPDATE_LAST_CHECK_KEY = "glassOrdersLastUpdateCheckAt";
+const UPDATE_LAST_ALERT_KEY = "glassOrdersLastUpdateAlert";
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const TELEGRAM_BOT_SETTINGS_KEY = "glassOrdersTelegramBotSettings";
+const DEFAULT_PUBLIC_BOT_SETTINGS = {
+  enabled: false,
+  openAtLogin: false,
+  startHiddenAtLogin: true,
+  canOpenAtLogin: false,
+  hasSupabase: false
+};
 const COMPANY = {
   nameEn: "EL HANDASIA GROUP FOR ARCHITECTURAL DESIGNS",
   nameAr: "المجموعة الهندسية للتصميمات المعمارية",
@@ -506,7 +521,9 @@ function makeLayer(overrides = {}) {
     alpha: overrides.alpha ?? 45,
     mirror: !!overrides.mirror,
     offsetX: overrides.offsetX ?? 0,
-    offsetY: overrides.offsetY ?? 0
+    offsetY: overrides.offsetY ?? 0,
+    followBaseWidth: overrides.followBaseWidth,
+    followBaseHeight: overrides.followBaseHeight
   };
 }
 
@@ -533,6 +550,40 @@ function makeRow(overrides = {}) {
     layers,
     drawing: normalizeDrawing(overrides.drawing)
   };
+}
+
+function copyRowSpecToTarget(sourceRow, targetRow) {
+  const targetLayers = targetRow.layers?.length ? targetRow.layers : [makeLayer()];
+  const targetMeasurements = targetLayers.map((layer) => ({ width: layer.width, height: layer.height }));
+  const fallbackMeasurement = targetMeasurements[0] || { width: 100, height: 100 };
+  const sourceLayers = normalizeLayers(sourceRow.glassMode || "single", sourceRow.layers || [makeLayer()]).map((layer, index) => {
+    const targetLayer = targetLayers[index] || {};
+    const measurement = targetMeasurements[index] || fallbackMeasurement;
+    return {
+      ...layer,
+      width: measurement.width,
+      height: measurement.height,
+      followBaseWidth: index === 0 ? false : targetLayer.followBaseWidth,
+      followBaseHeight: index === 0 ? false : targetLayer.followBaseHeight
+    };
+  });
+  return makeRow({
+    ...targetRow,
+    id: targetRow.id,
+    glassMode: sourceRow.glassMode,
+    quantity: targetRow.quantity,
+    unitPrice: sourceRow.unitPrice,
+    supplierUnitPrice: sourceRow.supplierUnitPrice,
+    materialUnitPrice: sourceRow.materialUnitPrice,
+    supplierMaterialUnitPrice: sourceRow.supplierMaterialUnitPrice,
+    doubleGap: sourceRow.doubleGap,
+    triplexPvb: sourceRow.triplexPvb,
+    extraDirection: sourceRow.extraDirection,
+    notes: sourceRow.notes,
+    expanded: targetRow.expanded,
+    layers: sourceLayers,
+    drawing: targetRow.drawing
+  });
 }
 
 function toLatinClipboardDigits(value) {
@@ -643,12 +694,24 @@ function normalizeDrawing(drawing = {}) {
 }
 
 function normalizeOutlinePoint(point = {}, index = 0) {
+  const mode = point.corner
+    ? "free"
+    : ["free", "curve", "arc"].includes(point.mode)
+      ? point.mode
+      : point.arc
+        ? "arc"
+        : point.curve
+          ? "curve"
+          : "free";
   return {
     id: point.id || `outline-${index}`,
     x: numberValue(point.x),
     y: numberValue(point.y),
     corner: !!point.corner,
-    curve: !!point.curve
+    mode,
+    halfDiameter: Math.max(0, numberValue(point.halfDiameter)),
+    curve: mode === "curve",
+    arc: mode === "arc"
   };
 }
 
@@ -658,10 +721,10 @@ function defaultOutlinePoints(geometry, edges = {}) {
   const bottom = numberValue(edges.bottom);
   const left = numberValue(edges.left);
   return [
-    { id: "corner-tl", x: geometry.x + left, y: geometry.y + top, corner: true, curve: false },
-    { id: "corner-tr", x: geometry.x + geometry.width - right, y: geometry.y + top, corner: true, curve: false },
-    { id: "corner-br", x: geometry.x + geometry.width - right, y: geometry.y + geometry.height - bottom, corner: true, curve: false },
-    { id: "corner-bl", x: geometry.x + left, y: geometry.y + geometry.height - bottom, corner: true, curve: false }
+    { id: "corner-tl", x: geometry.x + left, y: geometry.y + top, corner: true, mode: "free", curve: false },
+    { id: "corner-tr", x: geometry.x + geometry.width - right, y: geometry.y + top, corner: true, mode: "free", curve: false },
+    { id: "corner-br", x: geometry.x + geometry.width - right, y: geometry.y + geometry.height - bottom, corner: true, mode: "free", curve: false },
+    { id: "corner-bl", x: geometry.x + left, y: geometry.y + geometry.height - bottom, corner: true, mode: "free", curve: false }
   ];
 }
 
@@ -674,17 +737,175 @@ function outlinePointsForGeometry(drawing, geometry) {
 function outlinePath(points = []) {
   if (points.length === 0) return "";
   let d = `M ${numberValue(points[0].x)} ${numberValue(points[0].y)}`;
-  for (let i = 1; i < points.length; i += 1) {
-    const point = points[i];
-    if (point.curve && i < points.length - 1) {
-      const next = points[i + 1];
-      d += ` Q ${numberValue(point.x)} ${numberValue(point.y)} ${numberValue(next.x)} ${numberValue(next.y)}`;
-      i += 1;
+  for (const segment of outlinePathSegments(points)) {
+    if (segment.kind === "quad") d += ` Q ${numberValue(segment.control.x)} ${numberValue(segment.control.y)} ${numberValue(segment.end.x)} ${numberValue(segment.end.y)}`;
+    else if (segment.kind === "arc") {
+      const spec = arcSpec(segment);
+      d += ` A ${spec.radius} ${spec.radius} 0 ${spec.largeArc} ${spec.sweep} ${numberValue(segment.end.x)} ${numberValue(segment.end.y)}`;
     } else {
-      d += ` L ${numberValue(point.x)} ${numberValue(point.y)}`;
+      d += ` L ${numberValue(segment.end.x)} ${numberValue(segment.end.y)}`;
     }
   }
   return `${d} Z`;
+}
+
+function quadraticPoint(start, control, end, t) {
+  const mt = 1 - t;
+  return {
+    x: mt * mt * numberValue(start.x) + 2 * mt * t * numberValue(control.x) + t * t * numberValue(end.x),
+    y: mt * mt * numberValue(start.y) + 2 * mt * t * numberValue(control.y) + t * t * numberValue(end.y)
+  };
+}
+
+function quadraticTangent(start, control, end, t) {
+  return {
+    x: 2 * (1 - t) * (numberValue(control.x) - numberValue(start.x)) + 2 * t * (numberValue(end.x) - numberValue(control.x)),
+    y: 2 * (1 - t) * (numberValue(control.y) - numberValue(start.y)) + 2 * t * (numberValue(end.y) - numberValue(control.y))
+  };
+}
+
+function outlinePointMode(point = {}) {
+  if (point.corner) return "free";
+  if (point.mode === "arc") return "arc";
+  if (point.mode === "curve" || point.curve) return "curve";
+  return "free";
+}
+
+function chordDepth(start, control, end) {
+  const sx = numberValue(start.x);
+  const sy = numberValue(start.y);
+  const ex = numberValue(end.x);
+  const ey = numberValue(end.y);
+  const cx = numberValue(control.x);
+  const cy = numberValue(control.y);
+  const dx = ex - sx;
+  const dy = ey - sy;
+  const length = Math.max(1, Math.hypot(dx, dy));
+  return ((cx - sx) * -dy + (cy - sy) * dx) / length;
+}
+
+function arcDepth(segment) {
+  const chord = Math.hypot(numberValue(segment.end.x) - numberValue(segment.start.x), numberValue(segment.end.y) - numberValue(segment.start.y));
+  const measured = Math.abs(chordDepth(segment.start, segment.control, segment.end));
+  return Math.max(1, numberValue(segment.control.halfDiameter) || measured || chord / 4 || 1);
+}
+
+function arcRadiusFromDepth(chordLength, depth) {
+  const chord = Math.max(1, chordLength);
+  const sagitta = Math.max(1, depth);
+  return (chord * chord) / (8 * sagitta) + sagitta / 2;
+}
+
+function arcSpec(segment) {
+  const sx = numberValue(segment.start.x);
+  const sy = numberValue(segment.start.y);
+  const ex = numberValue(segment.end.x);
+  const ey = numberValue(segment.end.y);
+  const dx = ex - sx;
+  const dy = ey - sy;
+  const chord = Math.max(1, Math.hypot(dx, dy));
+  const depth = Math.min(arcDepth(segment), chord * 2);
+  const radius = arcRadiusFromDepth(chord, depth);
+  const sign = Math.sign(chordDepth(segment.start, segment.control, segment.end)) || 1;
+  const normal = { x: -dy / chord, y: dx / chord };
+  const mid = { x: (sx + ex) / 2, y: (sy + ey) / 2 };
+  const centerOffset = Math.max(0, radius - depth);
+  const center = { x: mid.x - normal.x * sign * centerOffset, y: mid.y - normal.y * sign * centerOffset };
+  const startAngle = Math.atan2(sy - center.y, sx - center.x);
+  const endAngle = Math.atan2(ey - center.y, ex - center.x);
+  const arcPeak = { x: mid.x + normal.x * sign * depth, y: mid.y + normal.y * sign * depth };
+  const candidates = [1, -1].map((direction) => {
+    let delta = endAngle - startAngle;
+    if (direction > 0) {
+      while (delta <= 0) delta += Math.PI * 2;
+    } else {
+      while (delta >= 0) delta -= Math.PI * 2;
+    }
+    const midAngle = startAngle + delta / 2;
+    const midpoint = { x: center.x + Math.cos(midAngle) * radius, y: center.y + Math.sin(midAngle) * radius };
+    return { direction, delta, midpoint, score: Math.hypot(midpoint.x - arcPeak.x, midpoint.y - arcPeak.y) };
+  }).sort((a, b) => a.score - b.score)[0];
+  return {
+    center,
+    radius,
+    startAngle,
+    delta: candidates.delta,
+    largeArc: Math.abs(candidates.delta) > Math.PI ? 1 : 0,
+    sweep: candidates.delta > 0 ? 1 : 0
+  };
+}
+
+function arcPoint(segment, t) {
+  const spec = arcSpec(segment);
+  const angle = spec.startAngle + spec.delta * t;
+  return {
+    x: spec.center.x + Math.cos(angle) * spec.radius,
+    y: spec.center.y + Math.sin(angle) * spec.radius
+  };
+}
+
+function outlinePathSegments(points = []) {
+  if (points.length < 2) return [];
+  const segments = [];
+  let current = points[0];
+  let currentIndex = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const point = points[i];
+    const mode = outlinePointMode(point);
+    if ((mode === "curve" || mode === "arc") && i < points.length - 1) {
+      const next = points[i + 1];
+      segments.push({ kind: mode === "arc" ? "arc" : "quad", start: current, control: point, end: next, startIndex: currentIndex, controlIndex: i, endIndex: i + 1 });
+      current = next;
+      currentIndex = i + 1;
+      i += 1;
+    } else {
+      segments.push({ kind: "line", start: current, end: point, startIndex: currentIndex, endIndex: i });
+      current = point;
+      currentIndex = i;
+    }
+  }
+  segments.push({ kind: "line", start: current, end: points[0], startIndex: currentIndex, endIndex: 0 });
+  return segments;
+}
+
+function flattenOutlinePoints(points = [], samples = 24) {
+  if (!points.length) return [];
+  const flat = [{ x: numberValue(points[0].x), y: numberValue(points[0].y) }];
+  for (const segment of outlinePathSegments(points)) {
+    if (segment.kind === "quad" || segment.kind === "arc") {
+      for (let step = 1; step <= samples; step += 1) {
+        flat.push(segment.kind === "arc" ? arcPoint(segment, step / samples) : quadraticPoint(segment.start, segment.control, segment.end, step / samples));
+      }
+    } else {
+      flat.push({ x: numberValue(segment.end.x), y: numberValue(segment.end.y) });
+    }
+  }
+  return flat;
+}
+
+function segmentPathD(segment) {
+  if (segment.kind === "quad") {
+    return `M ${numberValue(segment.start.x)} ${numberValue(segment.start.y)} Q ${numberValue(segment.control.x)} ${numberValue(segment.control.y)} ${numberValue(segment.end.x)} ${numberValue(segment.end.y)}`;
+  }
+  if (segment.kind === "arc") {
+    const spec = arcSpec(segment);
+    return `M ${numberValue(segment.start.x)} ${numberValue(segment.start.y)} A ${spec.radius} ${spec.radius} 0 ${spec.largeArc} ${spec.sweep} ${numberValue(segment.end.x)} ${numberValue(segment.end.y)}`;
+  }
+  return "";
+}
+
+function approximateSegmentLength(segment) {
+  if (segment.kind !== "quad" && segment.kind !== "arc") {
+    return Math.hypot(numberValue(segment.end.x) - numberValue(segment.start.x), numberValue(segment.end.y) - numberValue(segment.start.y));
+  }
+  let length = 0;
+  let previous = segment.kind === "arc" ? arcPoint(segment, 0) : quadraticPoint(segment.start, segment.control, segment.end, 0);
+  for (let step = 1; step <= 32; step += 1) {
+    const point = segment.kind === "arc" ? arcPoint(segment, step / 32) : quadraticPoint(segment.start, segment.control, segment.end, step / 32);
+    length += Math.hypot(point.x - previous.x, point.y - previous.y);
+    previous = point;
+  }
+  return length;
 }
 
 function outlineSegments(points = []) {
@@ -705,8 +926,9 @@ function geometryBottom(geometry) {
 
 function boundsFromOutline(points = [], fallback = { x: 0, y: 0, width: 1, height: 1 }) {
   const candidates = points.length ? points : defaultOutlinePoints(fallback);
-  const xs = candidates.map((point) => numberValue(point.x));
-  const ys = candidates.map((point) => numberValue(point.y));
+  const flattened = flattenOutlinePoints(candidates);
+  const xs = flattened.map((point) => numberValue(point.x));
+  const ys = flattened.map((point) => numberValue(point.y));
   const minX = Math.min(...xs);
   const maxX = Math.max(...xs);
   const minY = Math.min(...ys);
@@ -716,11 +938,14 @@ function boundsFromOutline(points = [], fallback = { x: 0, y: 0, width: 1, heigh
 
 function axisIntersections(points = [], axis, value) {
   const hits = [];
-  for (const segment of outlineSegments(points)) {
-    const x1 = numberValue(segment.start.x);
-    const y1 = numberValue(segment.start.y);
-    const x2 = numberValue(segment.end.x);
-    const y2 = numberValue(segment.end.y);
+  const flattened = flattenOutlinePoints(points);
+  for (let index = 0; index < flattened.length - 1; index += 1) {
+    const start = flattened[index];
+    const end = flattened[index + 1];
+    const x1 = numberValue(start.x);
+    const y1 = numberValue(start.y);
+    const x2 = numberValue(end.x);
+    const y2 = numberValue(end.y);
     if (axis === "y") {
       if (Math.abs(y1 - y2) < 0.001) {
         if (Math.abs(value - y1) < 0.001) hits.push(x1, x2);
@@ -900,27 +1125,41 @@ function rectSideDimensionItems(shape, bounds) {
 }
 
 function outlineDimensionItems(points = [], baseGeometry) {
-  const hasEditedOutline = points.length > 4 || points.some((point) => !point.corner || point.curve);
+  const hasEditedOutline = points.length > 4 || points.some((point) => !point.corner || outlinePointMode(point) !== "free");
   if (!hasEditedOutline) return [];
   const center = { x: numberValue(baseGeometry.x) + numberValue(baseGeometry.width) / 2, y: numberValue(baseGeometry.y) + numberValue(baseGeometry.height) / 2 };
-  return outlineSegments(points)
+  return outlinePathSegments(points)
     .map((segment) => {
       const x1 = numberValue(segment.start.x);
       const y1 = numberValue(segment.start.y);
       const x2 = numberValue(segment.end.x);
       const y2 = numberValue(segment.end.y);
-      const length = Math.hypot(x2 - x1, y2 - y1);
+      const length = approximateSegmentLength(segment);
       if (length < 20) return null;
-      const midX = (x1 + x2) / 2;
-      const midY = (y1 + y2) / 2;
-      const angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
-      let nx = -(y2 - y1) / length;
-      let ny = (x2 - x1) / length;
+      const midPoint = segment.kind === "quad"
+        ? quadraticPoint(segment.start, segment.control, segment.end, 0.5)
+        : segment.kind === "arc"
+          ? arcPoint(segment, 0.5)
+          : { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+      const arcBefore = segment.kind === "arc" ? arcPoint(segment, 0.48) : null;
+      const arcAfter = segment.kind === "arc" ? arcPoint(segment, 0.52) : null;
+      const tangent = segment.kind === "quad"
+        ? quadraticTangent(segment.start, segment.control, segment.end, 0.5)
+        : segment.kind === "arc"
+          ? { x: arcAfter.x - arcBefore.x, y: arcAfter.y - arcBefore.y }
+          : { x: x2 - x1, y: y2 - y1 };
+      const tangentLength = Math.max(1, Math.hypot(tangent.x, tangent.y));
+      const angle = Math.atan2(tangent.y, tangent.x) * 180 / Math.PI;
+      let nx = -tangent.y / tangentLength;
+      let ny = tangent.x / tangentLength;
+      const midX = midPoint.x;
+      const midY = midPoint.y;
       if ((midX + nx * 40 - center.x) ** 2 + (midY + ny * 40 - center.y) ** 2 < (midX - nx * 40 - center.x) ** 2 + (midY - ny * 40 - center.y) ** 2) {
         nx *= -1;
         ny *= -1;
       }
       return {
+        path: segmentPathD(segment),
         x1,
         y1,
         x2,
@@ -935,40 +1174,40 @@ function outlineDimensionItems(points = [], baseGeometry) {
 }
 
 function curveDepthItems(points = [], baseGeometry) {
-  const base = {
-    left: numberValue(baseGeometry.x),
-    right: geometryRight(baseGeometry),
-    top: numberValue(baseGeometry.y),
-    bottom: geometryBottom(baseGeometry)
-  };
-  return points
-    .filter((point) => point.curve)
-    .map((point) => {
-      const x = numberValue(point.x);
-      const y = numberValue(point.y);
-      const outside = [
-        { side: "الحافة اليسرى الأصلية", distance: Math.max(0, base.left - x), x1: base.left, y1: y, x2: x, y2: y },
-        { side: "الحافة اليمنى الأصلية", distance: Math.max(0, x - base.right), x1: base.right, y1: y, x2: x, y2: y },
-        { side: "الحافة العلوية الأصلية", distance: Math.max(0, base.top - y), x1: x, y1: base.top, x2: x, y2: y },
-        { side: "الحافة السفلية الأصلية", distance: Math.max(0, y - base.bottom), x1: x, y1: base.bottom, x2: x, y2: y }
-      ].sort((a, b) => b.distance - a.distance);
-      let chosen = outside[0];
-      if (!chosen.distance) {
-        chosen = [
-          { side: "الحافة اليسرى الأصلية", distance: Math.abs(x - base.left), x1: base.left, y1: y, x2: x, y2: y },
-          { side: "الحافة اليمنى الأصلية", distance: Math.abs(base.right - x), x1: base.right, y1: y, x2: x, y2: y },
-          { side: "الحافة العلوية الأصلية", distance: Math.abs(y - base.top), x1: x, y1: base.top, x2: x, y2: y },
-          { side: "الحافة السفلية الأصلية", distance: Math.abs(base.bottom - y), x1: x, y1: base.bottom, x2: x, y2: y }
-        ].sort((a, b) => a.distance - b.distance)[0];
+  return outlinePathSegments(points)
+    .filter((segment) => segment.kind === "quad" || segment.kind === "arc")
+    .map((segment) => {
+      const sx = numberValue(segment.start.x);
+      const sy = numberValue(segment.start.y);
+      const ex = numberValue(segment.end.x);
+      const ey = numberValue(segment.end.y);
+      const dx = ex - sx;
+      const dy = ey - sy;
+      const chordLength = Math.max(1, Math.hypot(dx, dy));
+      let best = null;
+      for (let step = 1; step < 32; step += 1) {
+        const point = quadraticPoint(segment.start, segment.control, segment.end, step / 32);
+        const along = ((point.x - sx) * dx + (point.y - sy) * dy) / (chordLength * chordLength);
+        const projection = {
+          x: sx + dx * Math.max(0, Math.min(1, along)),
+          y: sy + dy * Math.max(0, Math.min(1, along))
+        };
+        const distance = Math.hypot(point.x - projection.x, point.y - projection.y);
+        if (!best || distance > best.distance) best = { point, projection, distance };
       }
+      if (!best) return null;
       return {
-        ...chosen,
-        tx: (chosen.x1 + chosen.x2) / 2 + 18,
-        ty: (chosen.y1 + chosen.y2) / 2 - 18,
-        label: `منحنى ${Math.round(chosen.distance)}mm`
+        x1: best.projection.x,
+        y1: best.projection.y,
+        x2: best.point.x,
+        y2: best.point.y,
+        tx: (best.projection.x + best.point.x) / 2 + 18,
+        ty: (best.projection.y + best.point.y) / 2 - 18,
+        distance: best.distance,
+        label: `${segment.kind === "arc" ? "ارتفاع القوس" : "ارتفاع المنحنى"} ${Math.round(best.distance)}mm`
       };
     })
-    .filter((item) => item.distance > 1);
+    .filter((item) => item && item.distance > 1);
 }
 
 function rowBaseGeometry(row) {
@@ -1023,10 +1262,7 @@ function canCurveOutlinePoint(points, index) {
   if (index <= 0 || index >= points.length - 1) return false;
   const point = points[index];
   if (point.corner) return false;
-  const previous = points[index - 1];
-  const next = points[index + 1];
-  if (previous.corner || next.corner) return false;
-  return Math.abs(numberValue(previous.x) - numberValue(next.x)) < 3 || Math.abs(numberValue(previous.y) - numberValue(next.y)) < 3;
+  return true;
 }
 
 function drawingHasContent(drawing) {
@@ -1043,8 +1279,10 @@ function drawingOutlineSummary(drawing) {
   const normalized = normalizeDrawing(drawing);
   if (normalized.outline.points.length >= 4) {
     return normalized.outline.points.map((point, index) => {
-      const curve = point.curve ? " منحنى" : "";
-      return `نقطة ${index + 1}${curve}: أفقي ${Math.round(numberValue(point.x))}مم / رأسي ${Math.round(numberValue(point.y))}مم`;
+      const mode = outlinePointMode(point);
+      const modeText = mode === "arc" ? " قوس" : mode === "curve" ? " منحنى" : "";
+      const depth = mode === "arc" || mode === "curve" ? ` / عمق ${Math.round(numberValue(point.halfDiameter))}مم` : "";
+      return `نقطة ${index + 1}${modeText}: أفقي ${Math.round(numberValue(point.x))}مم / رأسي ${Math.round(numberValue(point.y))}مم${depth}`;
     }).join(" | ");
   }
   if (Object.values(normalized.edges).some((value) => numberValue(value) !== 0)) {
@@ -1066,11 +1304,46 @@ function drawingShapeSummary(shape) {
   return `ملاحظة: ${shape.text || "ملاحظة"}`;
 }
 
+function layerFollowsBase(layer, base, field) {
+  const flag = field === "width" ? layer.followBaseWidth : layer.followBaseHeight;
+  if (flag === false) return false;
+  if (flag === true) return true;
+  return numberValue(layer[field]) === numberValue(base[field]);
+}
+
 function normalizeLayers(mode, current) {
   const count = mode === "single" ? 1 : 2;
-  const next = [...current].map((layer) => makeLayer(layer));
-  while (next.length < count) next.push(makeLayer({ glassType: next[0]?.glassType || "شفاف" }));
-  return next.slice(0, count);
+  const next = [...(current || [])].map((layer) => makeLayer(layer));
+  const base = next[0] || makeLayer();
+  while (next.length < count) {
+    next.push(makeLayer({
+      glassType: base.glassType || "شفاف",
+      company: base.company,
+      thickness: base.thickness,
+      unitPrice: base.unitPrice,
+      supplierUnitPrice: base.supplierUnitPrice,
+      secure: base.secure,
+      color: base.color,
+      alpha: base.alpha,
+      mirror: base.mirror,
+      width: base.width,
+      height: base.height,
+      followBaseWidth: true,
+      followBaseHeight: true
+    }));
+  }
+  return next.slice(0, count).map((layer, index) => {
+    if (index === 0) return { ...layer, followBaseWidth: false, followBaseHeight: false };
+    const followWidth = layerFollowsBase(layer, base, "width");
+    const followHeight = layerFollowsBase(layer, base, "height");
+    return {
+      ...layer,
+      width: followWidth ? base.width : layer.width,
+      height: followHeight ? base.height : layer.height,
+      followBaseWidth: followWidth,
+      followBaseHeight: followHeight
+    };
+  });
 }
 
 function layerText(layer) {
@@ -1183,6 +1456,7 @@ const envSupabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
 const envSupabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const DEFAULT_LOCAL_USERS = [{ id: "local-admin", username: "admin", display_name: "Yasser Diab", role: "admin", password: "23320001", is_active: true }];
 let supabaseClientCache = { url: "", key: "", client: null };
+let supabasePublicClientCache = { url: "", key: "", client: null };
 
 function maskSensitiveText(value = "") {
   return String(value)
@@ -1209,6 +1483,60 @@ function hasSupabaseConfig() {
   return /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url) && key.length > 20;
 }
 
+function normalizePublicBotSettings(settings = {}) {
+  return {
+    ...DEFAULT_PUBLIC_BOT_SETTINGS,
+    enabled: settings.enabled === true,
+    openAtLogin: settings.openAtLogin === true,
+    startHiddenAtLogin: settings.startHiddenAtLogin !== false,
+    canOpenAtLogin: settings.canOpenAtLogin === true,
+    hasSupabase: settings.hasSupabase === true
+  };
+}
+
+function readBrowserBotSettings() {
+  try {
+    return normalizePublicBotSettings(JSON.parse(localStorage.getItem(TELEGRAM_BOT_SETTINGS_KEY) || "{}"));
+  } catch {
+    return { ...DEFAULT_PUBLIC_BOT_SETTINGS };
+  }
+}
+
+function saveBrowserBotSettings(patch = {}) {
+  const next = normalizePublicBotSettings({ ...readBrowserBotSettings(), ...patch });
+  localStorage.setItem(TELEGRAM_BOT_SETTINGS_KEY, JSON.stringify(next));
+  return next;
+}
+
+function supabaseProjectRef(url = supabaseConfig().url) {
+  return String(url || "").match(/^https:\/\/([a-z0-9-]+)\.supabase\.co$/i)?.[1] || "";
+}
+
+function supabaseAuthStorageKey(url = supabaseConfig().url) {
+  const projectRef = supabaseProjectRef(url) || "custom";
+  return `glass-orders-supabase-auth-${projectRef}-v2`;
+}
+
+function clearSupabaseAuthStorage(url = supabaseConfig().url) {
+  const projectRef = supabaseProjectRef(url);
+  const exactKeys = new Set([
+    "supabase.auth.token",
+    projectRef ? `sb-${projectRef}-auth-token` : "",
+    supabaseAuthStorageKey(url)
+  ].filter(Boolean));
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index) || "";
+    if (exactKeys.has(key) || key.startsWith("glass-orders-supabase-auth-")) {
+      localStorage.removeItem(key);
+    }
+  }
+}
+
+function isSupabaseSessionError(error) {
+  const text = String(error?.message || error?.code || error || "");
+  return /jwt|token|session|refresh_token|refresh token|unauthorized|forbidden|401|403|PGRST301/i.test(text);
+}
+
 function getSupabaseClient() {
   const { url, key } = supabaseConfig();
   if (!url || !key) return null;
@@ -1222,15 +1550,37 @@ function getSupabaseClient() {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true
+        detectSessionInUrl: true,
+        storageKey: supabaseAuthStorageKey(url)
       }
     })
   };
   return supabaseClientCache.client;
 }
 
+function getSupabasePublicClient() {
+  const { url, key } = supabaseConfig();
+  if (!url || !key) return null;
+  if (supabasePublicClientCache.client && supabasePublicClientCache.url === url && supabasePublicClientCache.key === key) {
+    return supabasePublicClientCache.client;
+  }
+  supabasePublicClientCache = {
+    url,
+    key,
+    client: createClient(url, key, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false
+      }
+    })
+  };
+  return supabasePublicClientCache.client;
+}
+
 function resetSupabaseClientCache() {
   supabaseClientCache = { url: "", key: "", client: null };
+  supabasePublicClientCache = { url: "", key: "", client: null };
 }
 
 function isLocalWebOrigin() {
@@ -1277,6 +1627,61 @@ function supabaseRedirectOptions() {
   const fallback = window.location.origin?.startsWith("http") ? window.location.origin : "";
   const redirectTo = configured || fallback;
   return redirectTo ? { redirectTo } : undefined;
+}
+
+function normalizeVersionText(value = "") {
+  const match = String(value || "").match(/v?\s*(\d+(?:\.\d+){0,2})/i);
+  if (!match) return "";
+  return match[1].split(".").concat(["0", "0"]).slice(0, 3).join(".");
+}
+
+function compareVersions(a, b) {
+  const left = normalizeVersionText(a).split(".").map((value) => numberValue(value));
+  const right = normalizeVersionText(b).split(".").map((value) => numberValue(value));
+  for (let index = 0; index < 3; index += 1) {
+    if ((left[index] || 0) > (right[index] || 0)) return 1;
+    if ((left[index] || 0) < (right[index] || 0)) return -1;
+  }
+  return 0;
+}
+
+async function latestGitHubRelease() {
+  const response = await fetch(GITHUB_LATEST_RELEASE_API, {
+    headers: { Accept: "application/vnd.github+json" },
+    cache: "no-store"
+  });
+  if (response.ok) return response.json();
+  if (response.status === 404) {
+    const listResponse = await fetch(GITHUB_RELEASES_API, {
+      headers: { Accept: "application/vnd.github+json" },
+      cache: "no-store"
+    });
+    if (listResponse.ok) {
+      const releases = await listResponse.json();
+      return Array.isArray(releases) ? releases.find((release) => !release.draft) || null : null;
+    }
+  }
+  {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(errorText || `GitHub HTTP ${response.status}`);
+  }
+}
+
+function openReleasePage(url = RELEASES_URL) {
+  window.open(url || RELEASES_URL, "_blank", "noopener,noreferrer");
+}
+
+async function showUpdateNotification(title, body, url) {
+  try {
+    if (!("Notification" in window)) return;
+    let permission = Notification.permission;
+    if (permission === "default") permission = await Notification.requestPermission();
+    if (permission !== "granted") return;
+    const notification = new Notification(title, { body, icon: appLogo });
+    notification.onclick = () => openReleasePage(url);
+  } catch {
+    // Browser/Electron notification support is best-effort.
+  }
 }
 
 async function localRequest(path, options = {}, timeoutMs = 3500) {
@@ -1365,10 +1770,21 @@ function writeOfflineSnapshot(data) {
   persisted?.catch?.(() => null);
 }
 
+function offlineOperationKey(operation = {}) {
+  if (operation.type?.startsWith("order-")) {
+    return `order:${operation.orderNo || operation.order?.orderNo || operation.orderId || operation.order?.id || ""}`;
+  }
+  if (operation.type?.startsWith("payment-")) {
+    return `payment:${operation.paymentId || operation.payment?.id || ""}`;
+  }
+  return `${operation.type || "unknown"}:${operation.id || ""}`;
+}
+
 function queueOfflineOperation(operation) {
   const queue = readOfflineQueue();
+  const key = offlineOperationKey(operation);
   const next = [
-    ...queue.filter((item) => !(item.type === operation.type && item.order?.orderNo === operation.order?.orderNo)),
+    ...queue.filter((item) => offlineOperationKey(item) !== key),
     { ...operation, id: uid(), queuedAt: new Date().toISOString(), attempts: 0 }
   ];
   writeOfflineQueue(next);
@@ -1389,6 +1805,14 @@ function upsertOfflineOrder(data, order) {
   const customers = upsertLocalParty(data.customers || [], nextOrder.customerName);
   const suppliers = upsertLocalParty(data.suppliers || [], nextOrder.supplierName);
   const next = { ...data, source: "offline", orders, customers, suppliers, learnedOptions: learnGap(data.learnedOptions, nextOrder), offlinePending: true };
+  writeLocal(next);
+  writeOfflineSnapshot(next);
+  return next;
+}
+
+function deleteOfflineOrder(data, order) {
+  const orders = (data.orders || []).filter((item) => item.id !== order.id && item.orderNo !== order.orderNo);
+  const next = { ...data, source: "offline", orders, offlinePending: true };
   writeLocal(next);
   writeOfflineSnapshot(next);
   return next;
@@ -1490,34 +1914,48 @@ async function loginUser(username, password, email = "") {
   const cleanUsername = cleanName(username);
   if (!cleanUsername || !password) throw new Error("اكتب اسم المستخدم وكلمة المرور.");
   const client = hasSupabaseConfig() ? getSupabaseClient() : null;
+  const lookupClient = client ? getSupabasePublicClient() || client : null;
   let supabaseLoginError = null;
-  if (client) {
+  if (client && lookupClient) {
     try {
-      const user = await supabaseUserByIdentity(client, cleanUsername, email);
+      const user = await supabaseUserByIdentity(lookupClient, cleanUsername, email);
       if (!user || user.is_active === false) throw new Error("بيانات الدخول غير صحيحة.");
       const authEmail = cleanName(user.email || "").toLocaleLowerCase();
       const appPasswordMatches = String(user.password || "") === String(password);
       const publicUser = appPublicUser(user);
-      const finishSupabaseLogin = async (updates = {}) => {
-        await client.from("users").update({ last_login_at: new Date().toISOString(), ...updates }).eq("id", user.id);
+      const finishSupabaseLogin = async (updates = {}, writeClient = lookupClient) => {
+        const updateResult = await writeClient.from("users").update({ last_login_at: new Date().toISOString(), ...updates }).eq("id", user.id);
+        if (updateResult.error) {
+          console.warn(maskSensitiveText(`Supabase login timestamp update skipped: ${safeErrorMessage(updateResult.error)}`));
+        }
         localStorage.setItem("glassOrdersUser", JSON.stringify(publicUser));
         setDataSourceMode("supabase");
         return publicUser;
       };
       if (authEmail) {
-        const authResult = await client.auth.signInWithPassword({ email: authEmail, password });
+        clearSupabaseAuthStorage();
+        resetSupabaseClientCache();
+        const authClient = getSupabaseClient();
+        const authResult = await authClient.auth.signInWithPassword({ email: authEmail, password });
         if (!authResult.error) {
           user.auth_user_id = authResult.data?.user?.id || user.auth_user_id || "";
           publicUser.auth_user_id = user.auth_user_id || "";
-          return finishSupabaseLogin({ auth_user_id: user.auth_user_id || null });
+          return finishSupabaseLogin({ auth_user_id: user.auth_user_id || null }, authClient);
         }
         if (!appPasswordMatches) throw new Error("بيانات الدخول غير صحيحة.");
         console.warn(maskSensitiveText(`Supabase Auth rejected login for ${user.username}; accepted app password fallback: ${authResult.error.message}`));
+        await authClient.auth.signOut({ scope: "local" }).catch(() => null);
+        clearSupabaseAuthStorage();
+        resetSupabaseClientCache();
         return finishSupabaseLogin();
       }
       if (!appPasswordMatches) throw new Error("بيانات الدخول غير صحيحة.");
       return finishSupabaseLogin();
     } catch (error) {
+      if (isSupabaseSessionError(error)) {
+        clearSupabaseAuthStorage();
+        resetSupabaseClientCache();
+      }
       supabaseLoginError = error;
     }
   }
@@ -1557,14 +1995,18 @@ async function loginUser(username, password, email = "") {
 
 async function setupSupabasePassword(username, email, password) {
   const client = getSupabaseClient();
+  const lookupClient = getSupabasePublicClient() || client;
   const cleanUsername = cleanName(username);
   const cleanEmailInput = cleanName(email);
   if (!client || !hasSupabaseConfig()) throw new Error("فعّل اتصال Supabase أولاً.");
   if ((!cleanUsername && !cleanEmailInput) || !password) throw new Error("اكتب اسم المستخدم وكلمة المرور الجديدة.");
-  const user = await supabaseUserByIdentity(client, cleanUsername, cleanEmailInput);
+  const user = await supabaseUserByIdentity(lookupClient, cleanUsername, cleanEmailInput);
   if (!user || user.is_active === false) throw new Error("المستخدم غير موجود أو موقوف في قاعدة التطبيق.");
   const cleanEmail = ensureSupabaseEmailMatches(user, cleanEmailInput);
-  const result = await client.auth.signUp({
+  clearSupabaseAuthStorage();
+  resetSupabaseClientCache();
+  const authClient = getSupabaseClient();
+  const result = await authClient.auth.signUp({
     email: cleanEmail,
     password,
     options: {
@@ -1574,18 +2016,19 @@ async function setupSupabasePassword(username, email, password) {
   });
   if (result.error) throw result.error;
   if (result.data?.user?.id) {
-    await client.from("users").update({ auth_user_id: result.data.user.id }).eq("id", user.id);
+    await (authClient || lookupClient).from("users").update({ auth_user_id: result.data.user.id }).eq("id", user.id);
   }
   return result.data;
 }
 
 async function sendSupabasePasswordReset(username, email) {
   const client = getSupabaseClient();
+  const lookupClient = getSupabasePublicClient() || client;
   const cleanUsername = cleanName(username);
   const cleanEmailInput = cleanName(email);
   if (!client || !hasSupabaseConfig()) throw new Error("فعّل اتصال Supabase أولاً.");
   if (!cleanUsername && !cleanEmailInput) throw new Error("اكتب اسم المستخدم أو البريد المسجل أولاً.");
-  const user = await supabaseUserByIdentity(client, cleanUsername, cleanEmailInput);
+  const user = await supabaseUserByIdentity(lookupClient, cleanUsername, cleanEmailInput);
   if (user?.is_active === false) throw new Error("المستخدم موقوف في قاعدة التطبيق.");
   if (!user && !cleanEmailInput) throw new Error("المستخدم غير موجود في قاعدة التطبيق.");
   if (!user) {
@@ -1601,8 +2044,9 @@ async function sendSupabasePasswordReset(username, email) {
 
 async function changeSupabaseAppUserPassword(currentUser, currentPassword, newPassword) {
   const client = getSupabaseClient();
+  const lookupClient = getSupabasePublicClient() || client;
   if (!client || !hasSupabaseConfig()) throw new Error("اتصال Supabase غير متاح.");
-  const user = await supabaseUserByIdentity(client, currentUser?.username || "", currentUser?.email || "");
+  const user = await supabaseUserByIdentity(lookupClient, currentUser?.username || "", currentUser?.email || "");
   if (!user || user.is_active === false) throw new Error("المستخدم غير موجود أو موقوف في قاعدة التطبيق.");
   if (!newPassword) throw new Error("اكتب كلمة المرور الجديدة.");
   if (!currentPassword) throw new Error("اكتب كلمة المرور الحالية.");
@@ -1735,6 +2179,34 @@ async function saveOrderToStore(order, data) {
   }
 }
 
+async function deleteOrderFromStore(order, data) {
+  if (!order?.id && !order?.orderNo) throw new Error("لا يوجد رقم طلب صالح للحذف.");
+  if (localServerEnabled()) {
+    try {
+      return await localRequest(`/api/orders/${encodeURIComponent(order.id || order.orderNo)}`, { method: "DELETE" }, 10000);
+    } catch {
+      // Keep the app usable even if the local server is closed after startup.
+    }
+  }
+  const client = supabaseEnabled() ? getSupabaseClient() : null;
+  if (!client) {
+    const next = deleteOfflineOrder(data, order);
+    if (hasSupabaseConfig()) {
+      queueOfflineOperation({ type: "order-delete", orderId: order.id, orderNo: order.orderNo });
+    }
+    return next;
+  }
+  try {
+    await deleteOrderFromSupabase(client, order);
+    return loadData();
+  } catch (error) {
+    if (!isConnectivityError(error)) throw error;
+    const next = deleteOfflineOrder(data, order);
+    queueOfflineOperation({ type: "order-delete", orderId: order.id, orderNo: order.orderNo });
+    return next;
+  }
+}
+
 async function saveOrderToSupabase(client, normalized) {
   const customer = await ensureParty(client, "customers", normalized.customerName);
   const supplier = await ensureParty(client, "suppliers", normalized.supplierName);
@@ -1793,6 +2265,25 @@ async function saveOrderToSupabase(client, normalized) {
   return orderId;
 }
 
+async function deleteOrderFromSupabase(client, order) {
+  let orderId = order.id || "";
+  if (orderId) {
+    const byId = await client.from("glass_orders").select("id").eq("id", orderId).maybeSingle();
+    if (byId.error) throw byId.error;
+    orderId = byId.data?.id || "";
+  }
+  if (!orderId && order.orderNo) {
+    const existing = await client.from("glass_orders").select("id").eq("order_no", order.orderNo).maybeSingle();
+    if (existing.error) throw existing.error;
+    orderId = existing.data?.id || "";
+  }
+  if (!orderId) return;
+  const rowsResult = await client.from("glass_order_rows").delete().eq("order_id", orderId);
+  if (rowsResult.error) throw rowsResult.error;
+  const orderResult = await client.from("glass_orders").delete().eq("id", orderId);
+  if (orderResult.error) throw orderResult.error;
+}
+
 async function syncOfflineQueue() {
   const queue = readOfflineQueue();
   if (!queue.length || !hasSupabaseConfig() || !navigator.onLine) return { synced: 0, remaining: queue.length };
@@ -1806,6 +2297,9 @@ async function syncOfflineQueue() {
       if (item.type === "order-upsert" && item.order) {
         const normalized = { ...item.order, status: normalizeOrderStatus(item.order.status), collectedPieces: numberValue(item.order.collectedPieces), customerName: cleanName(item.order.customerName), supplierName: cleanName(item.order.supplierName) };
         await saveOrderToSupabase(client, normalized);
+        synced += 1;
+      } else if (item.type === "order-delete" && (item.orderId || item.orderNo)) {
+        await deleteOrderFromSupabase(client, { id: item.orderId, orderNo: item.orderNo });
         synced += 1;
       } else if (item.type === "payment-upsert" && item.payment) {
         await savePaymentToSupabase(client, item.payment);
@@ -1911,6 +2405,7 @@ function App() {
   const [draftSavedMarker, setDraftSavedMarker] = useState("");
   const [preview, setPreview] = useState(null);
   const [supplierPayment, setSupplierPayment] = useState(null);
+  const [deleteOrderTarget, setDeleteOrderTarget] = useState(null);
   const [localStatus, setLocalStatus] = useState(null);
   const [pendingSyncCount, setPendingSyncCount] = useState(() => readOfflineQueue().length);
   const [online, setOnline] = useState(() => navigator.onLine);
@@ -1918,17 +2413,11 @@ function App() {
   const [clockTick, setClockTick] = useState(0);
   const [appearance, setAppearance] = useState(readAppearanceSettings);
   const [passwordRecoveryOpen, setPasswordRecoveryOpen] = useState(false);
-  const botAutoStartRef = useRef(false);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   useEffect(() => {
     if (currentUser) refresh();
     else setLoading(false);
-  }, [currentUser]);
-
-  useEffect(() => {
-    if (!currentUser || botAutoStartRef.current) return;
-    botAutoStartRef.current = true;
-    startTelegramBotSilently();
   }, [currentUser]);
 
   useEffect(() => {
@@ -1974,25 +2463,19 @@ function App() {
     }
   }
 
-  async function startTelegramBotSilently() {
-    const supabase = supabaseConfig();
-    try {
-      if (window.glassOrdersDesktop?.startTelegramBot) {
-        await window.glassOrdersDesktop.startTelegramBot({ supabaseUrl: supabase.url, supabaseKey: supabase.key });
-        return;
-      }
-      await localRequest("/api/telegram-bot/start", {
-        method: "POST",
-        body: JSON.stringify({ supabaseUrl: supabase.url, supabaseKey: supabase.key })
-      }, 6000);
-    } catch (error) {
-      console.warn(maskSensitiveText(`Telegram bot autostart skipped: ${safeErrorMessage(error)}`));
-    }
-  }
-
   useEffect(() => {
     if (online) syncPendingChanges({ quiet: true });
   }, [online]);
+
+  useEffect(() => {
+    if (!currentUser || !online) return undefined;
+    const lastCheck = numberValue(localStorage.getItem(UPDATE_LAST_CHECK_KEY));
+    if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL_MS) return undefined;
+    const timer = window.setTimeout(() => {
+      checkForUpdates({ quiet: true, automatic: true });
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [currentUser, online]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -2101,8 +2584,46 @@ function App() {
     }
   }
 
+  async function checkForUpdates({ quiet = false, automatic = false } = {}) {
+    if (checkingUpdates) return null;
+    setCheckingUpdates(true);
+    try {
+      localStorage.setItem(UPDATE_LAST_CHECK_KEY, String(Date.now()));
+      const release = await latestGitHubRelease();
+      if (!release) {
+        if (!quiet) setMessage(`لا توجد إصدارات منشورة على GitHub بعد. أنت تستخدم v${VERSION}.`);
+        return null;
+      }
+      const latestVersion = normalizeVersionText(release.tag_name || release.name);
+      const releaseUrl = release.html_url || RELEASES_URL;
+      if (!latestVersion) throw new Error("تعذر قراءة رقم الإصدار من GitHub.");
+      if (compareVersions(latestVersion, VERSION) > 0) {
+        const releaseLabel = release.tag_name || `v${latestVersion}`;
+        const messageText = `يتوفر تحديث جديد ${releaseLabel}. الإصدار الحالي v${VERSION}.`;
+        const alreadyAlerted = localStorage.getItem(UPDATE_LAST_ALERT_KEY) === releaseLabel;
+        if (!automatic || !alreadyAlerted) {
+          setMessage(`${messageText} افتح صفحة الإصدارات لتحميله.`);
+          await showUpdateNotification("تحديث جديد لبرنامج Glass Orders", messageText, releaseUrl);
+          localStorage.setItem(UPDATE_LAST_ALERT_KEY, releaseLabel);
+        }
+        return release;
+      }
+      if (!quiet) setMessage(`لا يوجد تحديث جديد. أنت تستخدم v${VERSION}.`);
+      return null;
+    } catch (error) {
+      if (!quiet) setMessage(`تعذر فحص التحديثات: ${safeErrorMessage(error)}`);
+      return null;
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }
+
   function logout() {
     if (currentDraftDirty() && !window.confirm("تسجيل الخروج سيمسح بيانات الإدخال الحالية. هل تريد المتابعة؟")) return;
+    const client = getSupabaseClient();
+    client?.auth?.signOut?.({ scope: "local" }).catch(() => null);
+    clearSupabaseAuthStorage();
+    resetSupabaseClientCache();
     localStorage.removeItem("glassOrdersUser");
     setCurrentUser(null);
     setData({ customers: [], suppliers: [], payments: [], orders: [], learnedOptions: GAP_DEFAULTS });
@@ -2323,15 +2844,39 @@ function App() {
         const saved = next.orders.find((item) => item.id === order.id || item.orderNo === order.orderNo) || nextOrder;
         setDraft(createDraft(saved));
       }
-      setMessage(`تم تحديث حالة ${displayOrderNo(order.orderNo)}: ${statusLabel(nextOrder.status)}`);
+      setMessage(Object.prototype.hasOwnProperty.call(patchValue, "status")
+        ? `تم تحديث حالة ${displayOrderNo(order.orderNo)}: ${statusLabel(nextOrder.status)}`
+        : `تم تحديث الطلب ${displayOrderNo(order.orderNo)}.`);
     } catch (error) {
       setMessage(`تعذر تحديث حالة الطلب: ${safeErrorMessage(error)}`);
+    }
+  }
+
+  async function confirmDeleteOrder(order) {
+    if (!order) return;
+    setLoading(true);
+    try {
+      const next = await deleteOrderFromStore(order, data);
+      setData(next);
+      setPendingSyncCount(readOfflineQueue().length);
+      if (draft.id === order.id || draft.orderNo === order.orderNo) {
+        const fresh = createDraft({ orderNo: generateOrderNo(next.orders || [], today()), date: today() });
+        setDraft(fresh);
+        setDraftSavedMarker("");
+      }
+      setDeleteOrderTarget(null);
+      setMessage(`تم حذف الطلب ${displayOrderNo(order.orderNo)} نهائياً.`);
+    } catch (error) {
+      setMessage(`تعذر حذف الطلب: ${safeErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
     }
   }
 
   const totals = orderTotals(draft);
   const smartOptions = useMemo(() => buildSmartOptions(data), [data]);
   const priceHistory = useMemo(() => buildPriceHistory(data.orders), [data.orders]);
+  const projectOptions = useMemo(() => uniqueValues((data.orders || []).map((order) => order.project).filter(Boolean)), [data.orders]);
   const connectionLabel = data.source === "local-server" ? `Local: ${localApiBase()}` : data.source === "supabase" ? "Supabase online" : "Local database disconnected";
   const cairoNow = useMemo(() => clockText("Africa/Cairo"), [clockTick]);
   const utcNow = useMemo(() => clockText("UTC"), [clockTick]);
@@ -2404,6 +2949,8 @@ function App() {
             online={online}
             onOpenOrders={() => setActiveTab("orders")}
             onNewOrder={() => newOrder()}
+            onCheckUpdates={() => checkForUpdates()}
+            checkingUpdates={checkingUpdates}
           />
         )}
         {activeTab === "entry" && (
@@ -2414,6 +2961,7 @@ function App() {
             suppliers={data.suppliers}
             learnedOptions={data.learnedOptions}
             smartOptions={smartOptions}
+            projectOptions={projectOptions}
             priceHistory={priceHistory}
             totals={totals}
             onSave={saveDraft}
@@ -2431,6 +2979,7 @@ function App() {
             logoSrc={reportLogoSrc}
             onOpen={openOrder}
             onUpdateOrder={updateOrderStatus}
+            onDeleteOrder={setDeleteOrderTarget}
             onPreview={(report) => setPreview({ type: "orderStatus", report })}
           />
         )}
@@ -2454,11 +3003,12 @@ function App() {
             onExportExcel={exportStatementExcel}
           />
         )}
-        {activeTab === "settings" && <SettingsView refreshAll={refresh} localStatus={localStatus} setMessage={setMessage} setLocalStatus={setLocalStatus} currentUser={currentUser} data={data} setData={setData} appearance={appearance} setAppearance={setAppearance} appLogoSrc={appLogoSrc} reportLogoSrc={reportLogoSrc} />}
+        {activeTab === "settings" && <SettingsView refreshAll={refresh} localStatus={localStatus} setMessage={setMessage} setLocalStatus={setLocalStatus} currentUser={currentUser} data={data} setData={setData} appearance={appearance} setAppearance={setAppearance} appLogoSrc={appLogoSrc} reportLogoSrc={reportLogoSrc} onCheckUpdates={() => checkForUpdates()} checkingUpdates={checkingUpdates} />}
       </section>
 
       {preview && <PreviewModal preview={preview} currentUser={currentUser} logoSrc={reportLogoSrc} onClose={() => setPreview(null)} />}
       {supplierPayment && <PaymentModal supplier={supplierPayment} onClose={() => setSupplierPayment(null)} onSave={addSupplierPayment} />}
+      {deleteOrderTarget && <DeleteOrderModal order={deleteOrderTarget} busy={loading} onClose={() => setDeleteOrderTarget(null)} onConfirm={confirmDeleteOrder} />}
       {passwordRecoveryOpen && <PasswordRecoveryModal busy={loading} onSave={completePasswordRecovery} onClose={() => setPasswordRecoveryOpen(false)} />}
     </main>
   );
@@ -2470,6 +3020,38 @@ function Notice({ message, onClose }) {
     <div className={`notice ${tone}`} role="status">
       <span>{message}</span>
       <button className="notice-close" type="button" title="إغلاق" onClick={onClose}><XCircle size={16} /></button>
+    </div>
+  );
+}
+
+function DeleteOrderModal({ order, busy, onClose, onConfirm }) {
+  const [confirmation, setConfirmation] = useState("");
+  const canDelete = confirmation.trim() === "حذف";
+  return (
+    <div className="hard-delete-backdrop" role="dialog" aria-modal="true">
+      <div className="hard-delete-modal">
+        <div className="hard-delete-warning">
+          <Trash2 size={34} />
+          <strong>سيتم حذف الملف نهائياً. هذه الخطوة للضرورة القصوى فقط.</strong>
+        </div>
+        <div className="hard-delete-summary">
+          <span>رقم الطلب</span>
+          <strong dir="ltr">{displayOrderNo(order.orderNo)}</strong>
+          <span>العميل</span>
+          <strong>{order.customerName || "بدون عميل"}</strong>
+        </div>
+        <p>سيتم حذف الطلب وكل صفوفه ورسوماته من قاعدة البيانات. لا تستخدم هذا الزر إلا عند الحاجة المؤكدة.</p>
+        <label className="hard-delete-input">
+          <span>اكتب كلمة حذف للتأكيد</span>
+          <input autoFocus value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="حذف" />
+        </label>
+        <div className="actions modal-actions">
+          <button type="button" onClick={onClose} disabled={busy}>إلغاء</button>
+          <button type="button" className="hard-delete-button" disabled={busy || !canDelete} onClick={() => onConfirm(order)}>
+            <Trash2 size={18} />حذف نهائي
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2492,7 +3074,7 @@ function SyncStatusBanner({ online, pending, syncing, onSync }) {
   );
 }
 
-function DashboardView({ data, pendingSyncCount, online, onOpenOrders, onNewOrder }) {
+function DashboardView({ data, pendingSyncCount, online, onOpenOrders, onNewOrder, onCheckUpdates, checkingUpdates }) {
   const orders = data.orders || [];
   const activeOrders = orders.filter((order) => ORDER_STATUS_DEFS.find((status) => status.value === normalizeOrderStatus(order.status))?.pending);
   const collectedOrders = orders.filter((order) => normalizeOrderStatus(order.status) === "collected");
@@ -2515,6 +3097,10 @@ function DashboardView({ data, pendingSyncCount, online, onOpenOrders, onNewOrde
         <div className="actions">
           <button className="primary" type="button" onClick={onNewOrder}><Plus size={18} />طلب جديد</button>
           <button type="button" onClick={onOpenOrders}><ClipboardList size={18} />حالة الطلبات</button>
+          <button type="button" onClick={onCheckUpdates} disabled={checkingUpdates}>
+            {checkingUpdates ? <Loader2 size={18} className="spin" /> : <Download size={18} />}
+            فحص التحديث
+          </button>
         </div>
       </section>
 
@@ -2725,7 +3311,7 @@ function PasswordRecoveryModal({ busy, onSave, onClose }) {
   );
 }
 
-function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smartOptions, priceHistory, totals, onSave, onPreview, onExportPdf, onExportExcel, onCancel, notify }) {
+function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smartOptions, projectOptions, priceHistory, totals, onSave, onPreview, onExportPdf, onExportExcel, onCancel, notify }) {
   const [tableFullScreen, setTableFullScreen] = useState(false);
   const tableScrollRef = useRef(null);
   function patch(patchValue) {
@@ -2745,6 +3331,20 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (!window.confirm("هل تريد حذف هذا الصف؟")) return;
     setDraft((current) => ({ ...current, rows: current.rows.length === 1 ? current.rows : current.rows.filter((_, i) => i !== index) }));
   }
+  function copyRowToFollowingRows(index) {
+    setDraft((current) => {
+      if (index >= current.rows.length - 1) {
+        notify?.("لا توجد صفوف أسفل هذا الصف لنسخ المواصفات إليها.");
+        return current;
+      }
+      const sourceRow = current.rows[index];
+      const rows = current.rows.map((targetRow, rowIndex) => (
+        rowIndex > index ? copyRowSpecToTarget(sourceRow, targetRow) : targetRow
+      ));
+      notify?.(`تم نسخ مواصفات الصف ${index + 1} إلى ${current.rows.length - index - 1} صف أسفله.`);
+      return { ...current, rows };
+    });
+  }
   function handleTableWheel(event) {
     if (!event.shiftKey || !tableScrollRef.current) return;
     event.preventDefault();
@@ -2758,10 +3358,12 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       quantity: measurements.quantity,
       expanded: false,
       drawing: normalizeDrawing(),
-      layers: base.layers.map((layer) => ({
+      layers: base.layers.map((layer, layerIndex) => ({
         ...layer,
         width: measurements.width,
-        height: measurements.height
+        height: measurements.height,
+        followBaseWidth: layerIndex > 0 ? true : false,
+        followBaseHeight: layerIndex > 0 ? true : false
       }))
     });
   }
@@ -2825,7 +3427,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
         </div>
         <div className="form-grid">
           <Field label="رقم الطلب الداخلي"><input className="generated-id" dir="ltr" value={displayOrderNo(draft.orderNo)} readOnly title="رقم تلقائي لا يتكرر" /></Field>
-          <Field label="رقم إذن / طلب المورد"><input dir="ltr" value={draft.documentId} onChange={(e) => patch({ documentId: e.target.value })} /></Field>
           <Field label="التاريخ"><input type="date" dir="ltr" value={draft.date} onChange={(e) => patch({ date: e.target.value })} /></Field>
           <Field label="حالة الطلب">
             <select value={normalizeOrderStatus(draft.status)} onChange={(e) => patch({ status: e.target.value })}>
@@ -2840,7 +3441,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
           </Field>
           <Field label="العميل"><Combo value={draft.customerName} options={customers.map((c) => c.name)} onChange={(customerName) => patch({ customerName })} /></Field>
           <Field label="المورد"><Combo value={draft.supplierName} options={suppliers.map((s) => s.name)} onChange={(supplierName) => patch({ supplierName })} /></Field>
-          <Field label="المشروع"><input value={draft.project} onChange={(e) => patch({ project: e.target.value })} /></Field>
+          <Field label="المشروع"><Combo value={draft.project} options={projectOptions} onChange={(project) => patch({ project })} /></Field>
         </div>
       </section>
       <section className={tableFullScreen ? "panel table-panel fullscreen-table" : "panel table-panel"}>
@@ -2859,7 +3460,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
         <div className="table-scroll" ref={tableScrollRef} onWheel={handleTableWheel} onPaste={handleTablePaste}>
           <div className="smart-table">
             <div className="table-row table-head">
-              <span>البيان</span><span>النظام</span><span>الطبقات والأسعار</span><span>ملاحظات</span><span>م2</span><span>إجمالي الفاتورة</span><span>تكلفة المورد</span><span>الرسم</span><span></span>
+              <span>البيان</span><span>النظام</span><span>الطبقات والأسعار</span><span>ملاحظات</span><span>م2</span><span>إجمالي الفاتورة</span><span>تكلفة المورد</span><span>الرسم</span><span>نسخ لأسفل</span><span></span>
             </div>
             {draft.rows.map((row, index) => (
               <GlassRowEditor
@@ -2874,6 +3475,8 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
                 updateRow={(updater) => updateRow(index, updater)}
                 addRow={addRow}
                 removeRow={() => removeRow(index)}
+                copyToFollowingRows={() => copyRowToFollowingRows(index)}
+                hasFollowingRows={index < draft.rows.length - 1}
               />
             ))}
           </div>
@@ -2898,7 +3501,7 @@ function OrderTotalsPanel({ totals, floating = false }) {
   );
 }
 
-function GlassRowEditor({ row, index, supplierName, learnedOptions, smartOptions, priceHistory, drawingEnabled, updateRow, addRow, removeRow }) {
+function GlassRowEditor({ row, index, supplierName, learnedOptions, smartOptions, priceHistory, drawingEnabled, updateRow, addRow, removeRow, copyToFollowingRows, hasFollowingRows }) {
   const totals = rowTotals(row);
   const hasLayerSizeDifference = rowHasLayerSizeDifference(row);
   const tableCellProps = (column) => ({
@@ -2914,9 +3517,16 @@ function GlassRowEditor({ row, index, supplierName, learnedOptions, smartOptions
   }
   function updateLayer(layerIndex, patchValue) {
     const autoPriceKeys = ["glassType", "company", "thickness", "secure"];
+    const baseBefore = row.layers[0] || makeLayer();
+    const baseAfter = layerIndex === 0 ? { ...baseBefore, ...patchValue } : baseBefore;
+    const firstWidthChanged = layerIndex === 0 && Object.prototype.hasOwnProperty.call(patchValue, "width");
+    const firstHeightChanged = layerIndex === 0 && Object.prototype.hasOwnProperty.call(patchValue, "height");
     const layers = row.layers.map((layer, i) => {
       if (i !== layerIndex) return layer;
-      const nextLayer = { ...layer, ...patchValue };
+      const nextPatch = { ...patchValue };
+      if (i > 0 && Object.prototype.hasOwnProperty.call(patchValue, "width")) nextPatch.followBaseWidth = false;
+      if (i > 0 && Object.prototype.hasOwnProperty.call(patchValue, "height")) nextPatch.followBaseHeight = false;
+      const nextLayer = { ...layer, ...nextPatch };
       if (autoPriceKeys.some((key) => Object.prototype.hasOwnProperty.call(patchValue, key))) {
         const latest = findLatestLayerPrice(priceHistory, supplierName, nextLayer);
         if (latest) {
@@ -2925,6 +3535,13 @@ function GlassRowEditor({ row, index, supplierName, learnedOptions, smartOptions
         }
       }
       return nextLayer;
+    }).map((layer, i) => {
+      if (i === 0) return layer;
+      return {
+        ...layer,
+        width: firstWidthChanged && layer.followBaseWidth !== false ? baseAfter.width : layer.width,
+        height: firstHeightChanged && layer.followBaseHeight !== false ? baseAfter.height : layer.height
+      };
     });
     updateRow({ ...row, layers });
   }
@@ -3027,6 +3644,7 @@ function GlassRowEditor({ row, index, supplierName, learnedOptions, smartOptions
         <strong dir="ltr">{money(totals.total)}</strong>
         <strong dir="ltr">{money(totals.supplierCost)}</strong>
         <button className={row.expanded ? "active tiny" : "tiny"} onClick={() => patch({ expanded: !row.expanded })}><Pencil size={16} />{drawingEnabled ? "رسم" : ""}</button>
+        <button className="icon-button copy-down" title="نسخ مواصفات هذا الصف إلى كل الصفوف أسفله فقط" disabled={!hasFollowingRows} onClick={copyToFollowingRows}><ArrowDownToLine size={16} /></button>
         <button className="icon-button danger" onClick={removeRow}><Trash2 size={16} /></button>
       </div>
       {drawingEnabled && !row.expanded && (
@@ -3046,6 +3664,7 @@ function DrawingEditor({ row, updateRow }) {
   const [tool, setTool] = useState("select");
   const [drag, setDrag] = useState(null);
   const [selectedShapeId, setSelectedShapeId] = useState(null);
+  const [selectedOutlinePointId, setSelectedOutlinePointId] = useState(null);
   const [viewScale, setViewScale] = useState(1);
   const editorRef = useRef(null);
   const svgRef = useRef(null);
@@ -3090,6 +3709,9 @@ function DrawingEditor({ row, updateRow }) {
   const outlineBounds = boundsFromOutline(outlinePoints, baseGeometry);
   const outlineDims = outlineDimensionItems(outlinePoints, baseGeometry);
   const curveDims = curveDepthItems(outlinePoints, baseGeometry);
+  const selectedOutlinePointIndex = outlinePoints.findIndex((point) => point.id === selectedOutlinePointId);
+  const selectedOutlinePoint = selectedOutlinePointIndex >= 0 ? outlinePoints[selectedOutlinePointIndex] : null;
+  const canDeleteSelectedOutlinePoint = !!selectedOutlinePoint && !selectedOutlinePoint.corner && outlinePoints.length > 4;
 
   function svgPointFromEvent(event) {
     if (!svgRef.current) return { x: 0, y: 0 };
@@ -3121,9 +3743,30 @@ function DrawingEditor({ row, updateRow }) {
   }, [selectedShapeId, shapes]);
 
   useEffect(() => {
+    if (selectedOutlinePointId && !outlinePoints.some((point) => point.id === selectedOutlinePointId)) setSelectedOutlinePointId(null);
+  }, [selectedOutlinePointId, outlinePoints]);
+
+  useEffect(() => {
     document.body.classList.toggle("drawing-dragging", !!drag);
     return () => document.body.classList.remove("drawing-dragging");
   }, [drag]);
+
+  useEffect(() => {
+    if (!drag) return undefined;
+    const stopDragging = () => setDrag(null);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+    window.addEventListener("blur", stopDragging);
+    return () => {
+      window.removeEventListener("pointerup", stopDragging);
+      window.removeEventListener("pointercancel", stopDragging);
+      window.removeEventListener("blur", stopDragging);
+    };
+  }, [drag]);
+
+  useEffect(() => () => {
+    document.body.classList.remove("drawing-dragging");
+  }, []);
 
   useEffect(() => {
     function handleKey(event) {
@@ -3136,12 +3779,14 @@ function DrawingEditor({ row, updateRow }) {
       } else if ((event.ctrlKey || event.metaKey) && (key === "y" || (event.shiftKey && key === "z"))) {
         event.preventDefault();
         redoDrawing();
-      } else if ((event.key === "Delete" || event.key === "Backspace") && selectedShapeId) {
+      } else if ((event.key === "Delete" || event.key === "Backspace") && (selectedShapeId || canDeleteSelectedOutlinePoint)) {
         event.preventDefault();
-        deleteShape(selectedShapeId);
+        if (selectedShapeId) deleteShape(selectedShapeId);
+        else if (selectedOutlinePointId) deleteOutlinePoint(selectedOutlinePointId);
       } else if (event.key === "Escape") {
         event.preventDefault();
         setSelectedShapeId(null);
+        setSelectedOutlinePointId(null);
       }
     }
     window.addEventListener("keydown", handleKey);
@@ -3172,11 +3817,83 @@ function DrawingEditor({ row, updateRow }) {
     setDrawing(next);
   }
   function updateShape(id, patchValue) {
+    setSelectedOutlinePointId(null);
     setSelectedShapeId(id);
     commitDrawing({ ...drawing, shapes: shapes.map((shape) => shape.id === id ? { ...shape, ...patchValue } : shape) });
   }
   function setOutlinePoints(points) {
     setDrawing({ ...drawing, outline: { points: points.map((point, index) => normalizeOutlinePoint(point, index)) } });
+  }
+  function commitOutlinePoints(points) {
+    commitDrawing({ ...drawing, outline: { points: points.map((point, index) => normalizeOutlinePoint(point, index)) } });
+  }
+  function updateOutlinePoint(id, patchValue) {
+    const next = outlinePoints.map((point, index) => point.id === id ? normalizeOutlinePoint({ ...point, ...patchValue }, index) : normalizeOutlinePoint(point, index));
+    commitOutlinePoints(next);
+    setSelectedShapeId(null);
+    setSelectedOutlinePointId(id);
+  }
+  function nudgeOutlinePoint(id, dx = 0, dy = 0) {
+    const point = outlinePoints.find((item) => item.id === id);
+    if (!point || point.corner) return;
+    updateOutlinePoint(id, {
+      x: clamp(numberValue(point.x) + dx, baseGeometry.x - 320, baseGeometry.x + baseGeometry.width + 320),
+      y: clamp(numberValue(point.y) + dy, baseGeometry.y - 320, baseGeometry.y + baseGeometry.height + 320)
+    });
+  }
+  function outlineDepthAt(index) {
+    if (index <= 0 || index >= outlinePoints.length - 1) return 0;
+    const previous = outlinePoints[index - 1];
+    const point = outlinePoints[index];
+    const next = outlinePoints[index + 1];
+    return Math.abs(chordDepth(previous, point, next));
+  }
+  function pointWithDepth(index, depthValue) {
+    if (index <= 0 || index >= outlinePoints.length - 1) return outlinePoints[index];
+    const previous = outlinePoints[index - 1];
+    const point = outlinePoints[index];
+    const next = outlinePoints[index + 1];
+    const sx = numberValue(previous.x);
+    const sy = numberValue(previous.y);
+    const ex = numberValue(next.x);
+    const ey = numberValue(next.y);
+    const dx = ex - sx;
+    const dy = ey - sy;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    const sign = Math.sign(chordDepth(previous, point, next)) || 1;
+    const depth = Math.max(0, numberValue(depthValue));
+    const mid = { x: (sx + ex) / 2, y: (sy + ey) / 2 };
+    const normal = { x: -dy / length, y: dx / length };
+    return {
+      ...point,
+      x: Math.round(clamp(mid.x + normal.x * sign * depth, baseGeometry.x - 320, baseGeometry.x + baseGeometry.width + 320)),
+      y: Math.round(clamp(mid.y + normal.y * sign * depth, baseGeometry.y - 320, baseGeometry.y + baseGeometry.height + 320)),
+      halfDiameter: depth
+    };
+  }
+  function updateOutlinePointMode(id, mode) {
+    const index = outlinePoints.findIndex((point) => point.id === id);
+    if (index < 0 || outlinePoints[index].corner) return;
+    const safeMode = ["free", "curve", "arc"].includes(mode) ? mode : "free";
+    const currentDepth = numberValue(outlinePoints[index].halfDiameter) || outlineDepthAt(index) || 80;
+    const next = outlinePoints.map((point, pointIndex) => {
+      if (pointIndex !== index) return normalizeOutlinePoint(point, pointIndex);
+      const shapedPoint = safeMode === "free" ? point : pointWithDepth(index, currentDepth);
+      return normalizeOutlinePoint({ ...shapedPoint, mode: safeMode, halfDiameter: safeMode === "free" ? 0 : currentDepth }, pointIndex);
+    });
+    commitOutlinePoints(next);
+    setSelectedShapeId(null);
+    setSelectedOutlinePointId(id);
+  }
+  function updateOutlinePointDepth(id, depthValue) {
+    const index = outlinePoints.findIndex((point) => point.id === id);
+    if (index < 0 || outlinePoints[index].corner || outlinePointMode(outlinePoints[index]) === "free") return;
+    const next = outlinePoints.map((point, pointIndex) => {
+      if (pointIndex !== index) return normalizeOutlinePoint(point, pointIndex);
+      return normalizeOutlinePoint(pointWithDepth(index, depthValue), pointIndex);
+    });
+    commitOutlinePoints(next);
+    setSelectedOutlinePointId(id);
   }
   function resetShape() {
     commitDrawing({
@@ -3192,6 +3909,7 @@ function DrawingEditor({ row, updateRow }) {
     const point = tool === "arrow" || tool === "text" ? workspacePointFromEvent(event) : mmFromEvent(event);
     if (tool === "select") {
       setSelectedShapeId(null);
+      setSelectedOutlinePointId(null);
       return;
     }
     const id = uid();
@@ -3205,6 +3923,7 @@ function DrawingEditor({ row, updateRow }) {
       commitDrawing({ ...drawing, shapes: [...shapes, { id, kind: "arrow", x1: point.x, y1: point.y, x2: clamp(point.x + 160, -pad + 40, maxW + pad - 40), y2: point.y, text: "", layer: 0 }] });
     }
     setSelectedShapeId(id);
+    setSelectedOutlinePointId(null);
   }
   function pointerMove(event) {
     if (drag?.outlinePoint) {
@@ -3214,8 +3933,7 @@ function DrawingEditor({ row, updateRow }) {
         return {
           ...outlinePoint,
           x: Math.round(point.x),
-          y: Math.round(point.y),
-          curve: drag.canCurve ? true : outlinePoint.curve
+          y: Math.round(point.y)
         };
       });
       setOutlinePoints(next);
@@ -3235,6 +3953,7 @@ function DrawingEditor({ row, updateRow }) {
           ...outlinePoint,
           x: Math.round(clamp(original.x + offsetX, baseGeometry.x - 320, baseGeometry.x + baseGeometry.width + 320)),
           y: Math.round(clamp(original.y + offsetY, baseGeometry.y - 320, baseGeometry.y + baseGeometry.height + 320)),
+          mode: "free",
           curve: false
         };
       });
@@ -3292,6 +4011,7 @@ function DrawingEditor({ row, updateRow }) {
     event.stopPropagation();
     editorRef.current?.focus();
     setSelectedShapeId(shape.id);
+    setSelectedOutlinePointId(null);
     pushHistory();
     const point = shape.kind === "arrow" || shape.kind === "text" ? workspacePointFromEvent(event) : mmFromEvent(event);
     if (shape.kind === "arrow") {
@@ -3305,12 +4025,19 @@ function DrawingEditor({ row, updateRow }) {
     event.stopPropagation();
     editorRef.current?.focus();
     setSelectedShapeId(shape.id);
+    setSelectedOutlinePointId(null);
     pushHistory();
     setDrag({ id: shape.id, handle });
   }
   function deleteShape(id) {
     commitDrawing({ ...drawing, shapes: shapes.filter((shape) => shape.id !== id), paths: paths.filter((path) => path.id !== id) });
     setSelectedShapeId(null);
+  }
+  function deleteOutlinePoint(id) {
+    const target = outlinePoints.find((point) => point.id === id);
+    if (!target || target.corner || outlinePoints.length <= 4) return;
+    commitOutlinePoints(outlinePoints.filter((point) => point.id !== id));
+    setSelectedOutlinePointId(null);
   }
   function addOutlinePoint(event, segmentIndex) {
     event.preventDefault();
@@ -3325,14 +4052,21 @@ function DrawingEditor({ row, updateRow }) {
       x: Math.round(point.x),
       y: Math.round(point.y),
       corner: false,
+      mode: "free",
+      halfDiameter: 0,
       curve: false
     });
     setOutlinePoints(next);
+    setSelectedShapeId(null);
+    setSelectedOutlinePointId(next[pointIndex].id);
     setDrag({ outlinePoint: true, index: pointIndex, canCurve: canCurveOutlinePoint(next, pointIndex) });
   }
   function startOutlinePointDrag(event, point, pointIndex) {
     event.preventDefault();
     event.stopPropagation();
+    editorRef.current?.focus();
+    setSelectedShapeId(null);
+    setSelectedOutlinePointId(point.id);
     if (point.corner) return;
     pushHistory();
     setDrag({ outlinePoint: true, index: pointIndex, canCurve: canCurveOutlinePoint(outlinePoints, pointIndex) });
@@ -3397,12 +4131,19 @@ function DrawingEditor({ row, updateRow }) {
           <button className="tiny" onClick={() => zoomDrawing(0.1)}>+</button>
           <button className="tiny" onClick={() => zoomDrawing(-0.1)}>-</button>
           <button className="tiny" onClick={resetDrawingView}>إعادة العرض</button>
-          <button className="tiny danger" onClick={() => selectedShapeId && deleteShape(selectedShapeId)} disabled={!selectedShapeId}><Trash2 size={14} />حذف المحدد</button>
+          <button
+            className="tiny danger"
+            onClick={() => selectedShapeId ? deleteShape(selectedShapeId) : selectedOutlinePointId && deleteOutlinePoint(selectedOutlinePointId)}
+            disabled={!selectedShapeId && !canDeleteSelectedOutlinePoint}
+          >
+            <Trash2 size={14} />حذف المحدد
+          </button>
           <button className="tiny danger" onClick={resetShape}><RefreshCw size={15} />Reset Shape</button>
         </div>
         <div className="outline-controls">
           <span className="outline-count">{outlinePoints.filter((point) => !point.corner).length} نقاط تعديل</span>
-          <span className="outline-count">{outlinePoints.filter((point) => point.curve).length} منحنى</span>
+          <span className="outline-count">{outlinePoints.filter((point) => outlinePointMode(point) === "curve").length} منحنى</span>
+          <span className="outline-count">{outlinePoints.filter((point) => outlinePointMode(point) === "arc").length} قوس</span>
         </div>
       </div>
       <div className="drawing-stage" onWheel={handleDrawingWheel}>
@@ -3455,11 +4196,11 @@ function DrawingEditor({ row, updateRow }) {
                   <g className="outline-edit-guides">
                     <path className="outline-active-path" d={layerPath} />
                     {outlinePoints.map((point, pointIndex) => {
-                      if (!point.curve || pointIndex <= 0 || pointIndex >= outlinePoints.length - 1) return null;
+                      if (outlinePointMode(point) === "free" || pointIndex <= 0 || pointIndex >= outlinePoints.length - 1) return null;
                       const previous = outlinePoints[pointIndex - 1];
                       const next = outlinePoints[pointIndex + 1];
                       return (
-                        <g className="outline-curve-guides" key={`curve-${point.id}`}>
+                        <g className={outlinePointMode(point) === "arc" ? "outline-curve-guides arc" : "outline-curve-guides"} key={`curve-${point.id}`}>
                           <line x1={previous.x} y1={previous.y} x2={point.x} y2={point.y} />
                           <line x1={point.x} y1={point.y} x2={next.x} y2={next.y} />
                         </g>
@@ -3479,7 +4220,7 @@ function DrawingEditor({ row, updateRow }) {
                     {outlinePoints.map((point, pointIndex) => (
                       <circle
                         key={point.id}
-                        className={`outline-control-point${point.corner ? " corner" : ""}${point.curve ? " curve" : ""}`}
+                        className={`outline-control-point${point.corner ? " corner" : ""}${outlinePointMode(point) === "curve" ? " curve" : ""}${outlinePointMode(point) === "arc" ? " arc" : ""}${point.id === selectedOutlinePointId ? " selected-outline-point" : ""}`}
                         cx={point.x}
                         cy={point.y}
                         r={point.corner ? 9 : 12}
@@ -3504,7 +4245,7 @@ function DrawingEditor({ row, updateRow }) {
           <g className="edge-dimension-lines">
             {outlineDims.map((item, itemIndex) => (
               <g key={`outline-dim-${itemIndex}`}>
-                <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} />
+                {item.path ? <path d={item.path} fill="none" /> : <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} />}
                 <text x={item.tx} y={item.ty} textAnchor="middle" transform={item.rotate || undefined}>{item.label}</text>
               </g>
             ))}
@@ -3616,12 +4357,44 @@ function DrawingEditor({ row, updateRow }) {
               </foreignObject>
             );
           })()}
+          {selectedOutlinePoint && (() => {
+            const popoverX = clamp(numberValue(selectedOutlinePoint.x) + 34, -pad + 24, maxW + pad - 300);
+            const popoverY = clamp(numberValue(selectedOutlinePoint.y) - 124, -pad + 24, maxH + pad - 138);
+            return (
+              <foreignObject className="shape-popover-object" x={popoverX} y={popoverY} width="270" height="112" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>
+                <div className="shape-popover" dir="rtl" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+                  <strong>{selectedOutlinePoint.corner ? "ركن ثابت" : outlinePointMode(selectedOutlinePoint) === "arc" ? "نقطة قوس" : outlinePointMode(selectedOutlinePoint) === "curve" ? "نقطة منحنى" : "نقطة حرة"}</strong>
+                  <span>{`X ${Math.round(numberValue(selectedOutlinePoint.x))} / Y ${Math.round(numberValue(selectedOutlinePoint.y))}`}</span>
+                  <div className="shape-popover-actions">
+                    <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setSelectedOutlinePointId(null); }}>إخفاء</button>
+                    <button type="button" className="danger" disabled={!canDeleteSelectedOutlinePoint} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); deleteOutlinePoint(selectedOutlinePoint.id); }}>حذف</button>
+                  </div>
+                </div>
+              </foreignObject>
+            );
+          })()}
         </svg>
       </div>
       <div className="shape-list">
-        {shapes.length === 0 && <span className="hint">اختر ثقب، مستطيل، نص، أو سهم ثم اضغط داخل الرسم لإضافته.</span>}
+        {shapes.length === 0 && !selectedOutlinePoint && <span className="hint">اختر ثقب، مستطيل، نص، أو سهم ثم اضغط داخل الرسم لإضافته.</span>}
+        {selectedOutlinePoint && (
+          <div className="shape-control selected" key={selectedOutlinePoint.id}>
+            <strong>{selectedOutlinePoint.corner ? "ركن ثابت" : outlinePointMode(selectedOutlinePoint) === "arc" ? "نقطة قوس" : outlinePointMode(selectedOutlinePoint) === "curve" ? "نقطة منحنى" : "نقطة حرة"}</strong>
+            <label><span>من اليسار مم</span><input dir="ltr" inputMode="decimal" value={Math.round(numberValue(selectedOutlinePoint.x))} disabled={selectedOutlinePoint.corner} onChange={(event) => updateOutlinePoint(selectedOutlinePoint.id, { x: event.target.value })} /></label>
+            <label><span>من الأعلى مم</span><input dir="ltr" inputMode="decimal" value={Math.round(numberValue(selectedOutlinePoint.y))} disabled={selectedOutlinePoint.corner} onChange={(event) => updateOutlinePoint(selectedOutlinePoint.id, { y: event.target.value })} /></label>
+            <label><span>نوع النقطة</span><select value={outlinePointMode(selectedOutlinePoint)} disabled={selectedOutlinePoint.corner || !canCurveOutlinePoint(outlinePoints, selectedOutlinePointIndex)} onChange={(event) => updateOutlinePointMode(selectedOutlinePoint.id, event.target.value)}><option value="free">حرة</option><option value="curve">منحنى</option><option value="arc">قوس</option></select></label>
+            <label><span>العمق من الحافة مم</span><input dir="ltr" inputMode="decimal" value={Math.round(numberValue(selectedOutlinePoint.halfDiameter) || outlineDepthAt(selectedOutlinePointIndex))} disabled={selectedOutlinePoint.corner || outlinePointMode(selectedOutlinePoint) === "free"} onChange={(event) => updateOutlinePointDepth(selectedOutlinePoint.id, event.target.value)} /></label>
+            <div className="outline-nudge-buttons">
+              <button className="tiny" type="button" disabled={selectedOutlinePoint.corner} onClick={() => nudgeOutlinePoint(selectedOutlinePoint.id, 0, -10)}>أعلى</button>
+              <button className="tiny" type="button" disabled={selectedOutlinePoint.corner} onClick={() => nudgeOutlinePoint(selectedOutlinePoint.id, 0, 10)}>أسفل</button>
+              <button className="tiny" type="button" disabled={selectedOutlinePoint.corner} onClick={() => nudgeOutlinePoint(selectedOutlinePoint.id, -10, 0)}>يسار</button>
+              <button className="tiny" type="button" disabled={selectedOutlinePoint.corner} onClick={() => nudgeOutlinePoint(selectedOutlinePoint.id, 10, 0)}>يمين</button>
+            </div>
+            <button className="tiny danger" disabled={!canDeleteSelectedOutlinePoint} onClick={() => deleteOutlinePoint(selectedOutlinePoint.id)}><Trash2 size={14} />حذف النقطة</button>
+          </div>
+        )}
         {shapes.map((shape) => (
-          <div className={shape.id === selectedShapeId ? "shape-control selected" : "shape-control"} key={shape.id} onPointerDown={() => setSelectedShapeId(shape.id)}>
+          <div className={shape.id === selectedShapeId ? "shape-control selected" : "shape-control"} key={shape.id} onPointerDown={() => { setSelectedOutlinePointId(null); setSelectedShapeId(shape.id); }}>
             <strong>{shape.kind === "circle" ? "ثقب" : shape.kind === "rect" ? "مستطيل" : shape.kind === "arrow" ? "سهم" : "نص"}</strong>
             {shape.kind === "arrow" ? (
               <>
@@ -3864,7 +4637,7 @@ function PreviewModal({ preview, currentUser, logoSrc, onClose }) {
         <div className="panel-head">
           <h2>{title}</h2>
           <div className="actions">
-            <button onClick={() => exportElementPdf(contentRef.current, `${safeFileName(title)}.pdf`).catch(showExportError)}><FileDown size={16} />PDF</button>
+            <button onClick={() => exportElementPdf(contentRef.current, `${safeFileName(preview.type === "order" ? orderExportFileBase(preview.order) : title)}.pdf`).catch(showExportError)}><FileDown size={16} />PDF</button>
             <button onClick={() => exportPreviewExcel(preview)}><FileSpreadsheet size={16} />Excel</button>
             <button onClick={onClose}>إغلاق</button>
           </div>
@@ -3882,16 +4655,13 @@ function PreviewModal({ preview, currentUser, logoSrc, onClose }) {
 
 function OrderReport({ order, currentUser, logoSrc }) {
   const totals = orderTotals(order);
-  const issuedAt = new Date();
+  const includeDrawingPages = order.entryMode === "drawings" || order.rows.some((row) => drawingHasContent(row.drawing));
   return (
     <div className="report">
       <ReportHeader title={`طلب شراء زجاج ${displayOrderNo(order.orderNo)}`} logoSrc={logoSrc} />
-      <ReportTiming items={[
-        { label: "تاريخ الإدخال", value: order.entryAt || order.date, exact: !!order.entryAt },
-        { label: "تاريخ الإصدار", value: issuedAt, exact: true }
-      ]} />
+      <div className="order-report-date"><span>التاريخ</span><strong dir="ltr">{formatStatusDate(order.date)}</strong></div>
       <div className="report-meta">
-        <span>العميل: {order.customerName}</span><span>المورد: {order.supplierName}</span><span>رقم إذن المورد: <bdi dir="ltr">{orderDocumentId(order)}</bdi></span><span>المشروع: {order.project}</span>
+        <span>العميل: {order.customerName}</span><span>المورد: {order.supplierName}</span><span>المشروع: {order.project}</span>
       </div>
       <div className="report-table order-report-table">
         <div className="report-row order-report-row head"><span>NO.</span><span>البيان</span><span>الشركة</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
@@ -3904,7 +4674,7 @@ function OrderReport({ order, currentUser, logoSrc }) {
         })}
         <div className="report-row order-report-row subtotal"><span className="subtotal-label">الإجمالي</span><span className="keep-line">{money(totals.pieces)}</span><span className="keep-line">{square(totals.area)}</span></div>
       </div>
-      {order.rows.some((row) => drawingHasContent(row.drawing)) && (
+      {includeDrawingPages && (
         <div className="drawing-report">
           {order.rows.map((row, index) => <DrawingReportPage key={row.id} row={row} index={index} />)}
         </div>
@@ -3916,6 +4686,7 @@ function OrderReport({ order, currentUser, logoSrc }) {
 
 function DrawingReportPage({ row, index }) {
   const fabricationNotes = drawingFabricationNotes(row);
+  const notes = fabricationNotes.length ? fabricationNotes : ["لوح مسطح بدون قص أو ثقوب إضافية."];
   return (
     <div className="drawing-page">
       <h3>رسم الصف {index + 1}: {rowDescription(row)}</h3>
@@ -3925,11 +4696,9 @@ function DrawingReportPage({ row, index }) {
           <p key={layerIndex}>{layerReportDescription(layer, layerIndex)}</p>
         ))}
       </div>
-      {fabricationNotes.length > 0 && (
-        <div className="fabrication-notes">
-          {fabricationNotes.map((note, noteIndex) => <p key={noteIndex}>{note}</p>)}
-        </div>
-      )}
+      <div className="fabrication-notes">
+        {notes.map((note, noteIndex) => <p key={noteIndex}>{note}</p>)}
+      </div>
     </div>
   );
 }
@@ -4000,7 +4769,7 @@ function DrawingPreview({ row }) {
       <g className="edge-dimension-lines">
         {outlineDims.map((item, itemIndex) => (
           <g key={`preview-outline-dim-${itemIndex}`}>
-            <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} />
+            {item.path ? <path d={item.path} fill="none" /> : <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} />}
             <text x={item.tx} y={item.ty} textAnchor="middle" transform={item.rotate || undefined}>{item.label}</text>
           </g>
         ))}
@@ -4041,7 +4810,7 @@ function DrawingPreview({ row }) {
   );
 }
 
-function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, onPreview }) {
+function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, onDeleteOrder, onPreview }) {
   const supplierNames = useMemo(() => uniqueValues([...data.suppliers.map((supplier) => supplier.name), ...data.orders.map((order) => order.supplierName || "بدون مورد")]), [data]);
   const statusScrollRef = useRef(null);
   const [query, setQuery] = useState("");
@@ -4049,6 +4818,7 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
   const [selectedStatuses, setSelectedStatuses] = useState(["ordered", "fabrication", "ready", "partial"]);
   const [pinnedRows, setPinnedRows] = useState(() => new Set());
   const [collectedDrafts, setCollectedDrafts] = useState({});
+  const [documentDrafts, setDocumentDrafts] = useState({});
   const selectedSupplierSet = useMemo(() => new Set(selectedSuppliers), [selectedSuppliers]);
   const selectedStatusSet = useMemo(() => new Set(selectedStatuses), [selectedStatuses]);
   const visibleOrders = useMemo(() => data.orders.filter((order) => {
@@ -4096,6 +4866,32 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
     setCollectedDrafts((current) => ({ ...current, [key]: value }));
   }
 
+  function editDocumentDraft(order, value) {
+    const key = rowKeyForOrder(order);
+    setDocumentDrafts((current) => ({ ...current, [key]: value }));
+  }
+
+  function commitDocumentDraft(order, valueOverride) {
+    const key = rowKeyForOrder(order);
+    const hasDraft = Object.prototype.hasOwnProperty.call(documentDrafts, key);
+    if (!hasDraft && valueOverride === undefined) return;
+    const value = cleanName(valueOverride ?? documentDrafts[key]);
+    if (value === cleanName(order.documentId)) {
+      setDocumentDrafts((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      return;
+    }
+    setDocumentDrafts((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    updateStatus(order, { documentId: value });
+  }
+
   function commitCollectedDraft(order, valueOverride) {
     const key = rowKeyForOrder(order);
     const hasDraft = Object.prototype.hasOwnProperty.call(collectedDrafts, key);
@@ -4139,7 +4935,7 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
       <section className="panel status-table-panel" ref={statusScrollRef} onWheel={handleStatusWheel}>
         <div className="status-table">
           <div className="status-row status-head">
-            <span>رقم داخلي</span><span>رقم المورد</span><span>المورد</span><span>العميل / المشروع</span><span>التاريخ</span><span>الحالة</span><span>المستلم / المتبقي</span><span>اختصارات</span><span>تكلفة المورد</span><span></span>
+            <span>رقم داخلي</span><span>رقم إذن المورد</span><span>المورد</span><span>العميل / المشروع</span><span>التاريخ</span><span>الحالة</span><span>المستلم / المتبقي</span><span>اختصارات</span><span>تكلفة المورد</span><span>إجراءات</span>
           </div>
           {visibleOrders.length === 0 && <p className="hint padded">لا توجد طلبات مطابقة للفلاتر.</p>}
           {visibleOrders.map((order) => {
@@ -4150,10 +4946,21 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
             const remainingPieces = orderRemainingPieces(order);
             const collectionLocked = ["pricing", "cancelled"].includes(status);
             const collectedDraftValue = Object.prototype.hasOwnProperty.call(collectedDrafts, rowKey) ? collectedDrafts[rowKey] : (collectedPieces || "");
+            const documentDraftValue = Object.prototype.hasOwnProperty.call(documentDrafts, rowKey) ? documentDrafts[rowKey] : (order.documentId || "");
             return (
               <div className="status-row" key={rowKey}>
                 <strong dir="ltr">{displayOrderNo(order.orderNo)}</strong>
-                <span dir="ltr">{orderDocumentId(order)}</span>
+                <input
+                  className="status-document-input"
+                  dir="ltr"
+                  value={documentDraftValue}
+                  onChange={(event) => editDocumentDraft(order, event.target.value)}
+                  onBlur={(event) => commitDocumentDraft(order, event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                  placeholder={displayOrderNo(order.orderNo)}
+                />
                 <span>{order.supplierName || "بدون مورد"}</span>
                 <span>{order.customerName || "بدون عميل"} / {order.project || "بدون مشروع"}</span>
                 <span className="status-date" dir="ltr">{formatStatusDate(order.date)}</span>
@@ -4181,7 +4988,10 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
                   <label><input type="checkbox" checked={status === "cancelled"} onChange={(event) => setSpecialStatus(order, event.target.checked, "cancelled")} />ملغي</label>
                 </div>
                 <span className={isOrderPayableForSupplier(order) ? "payable yes" : "payable no"}>{isOrderPayableForSupplier(order) ? money(totals.supplierCost) : "غير مستحق"}</span>
-                <button className="tiny" onClick={() => onOpen(order)}><Pencil size={14} />فتح</button>
+                <div className="status-actions">
+                  <button className="tiny" onClick={() => onOpen(order)}><Pencil size={14} />فتح</button>
+                  <button className="tiny danger solid-danger" onClick={() => onDeleteOrder(order)}><Trash2 size={14} />حذف</button>
+                </div>
               </div>
             );
           })}
@@ -4248,7 +5058,6 @@ function buildOrderStatusReport(orders, selectedSuppliers = []) {
         statuses: new Set(),
         quantity: 0,
         area: 0,
-        supplierCost: 0,
         notes: new Set()
       });
     }
@@ -4265,7 +5074,6 @@ function buildOrderStatusReport(orders, selectedSuppliers = []) {
     group.statuses.add(normalizeOrderStatus(order.status));
     group.quantity += remainingPieces;
     group.area += totals.area * remainingRatio;
-    group.supplierCost += totals.supplierCost * remainingRatio;
     for (const row of order.rows || []) {
       group.glassItems.add(rowDescription(row));
       if (row.notes) group.notes.add(row.notes);
@@ -4283,39 +5091,36 @@ function buildOrderStatusReport(orders, selectedSuppliers = []) {
       glass: [...row.glassItems].join(" | "),
       quantity: row.quantity,
       area: row.area,
-      supplierCost: row.supplierCost,
       status: statuses[0] || "ordered",
       statusText: statuses.map(statusLabel).join(" / "),
       notes: [...row.notes].join(" | ")
     };
   }).sort((a, b) => a.supplier.localeCompare(b.supplier, "ar") || String(a.documentId).localeCompare(String(b.documentId), "ar"));
   const suppliers = Object.values(rows.reduce((groups, row) => {
-    groups[row.supplier] ||= { supplier: row.supplier, rows: [], subtotal: { quantity: 0, area: 0, supplierCost: 0 } };
+    groups[row.supplier] ||= { supplier: row.supplier, rows: [], subtotal: { quantity: 0, area: 0 } };
     groups[row.supplier].rows.push(row);
     groups[row.supplier].subtotal.quantity += numberValue(row.quantity);
     groups[row.supplier].subtotal.area += numberValue(row.area);
-    groups[row.supplier].subtotal.supplierCost += numberValue(row.supplierCost);
     return groups;
   }, {}));
   const total = rows.reduce((sum, row) => {
     sum.quantity += numberValue(row.quantity);
     sum.area += numberValue(row.area);
-    sum.supplierCost += numberValue(row.supplierCost);
     return sum;
-  }, { quantity: 0, area: 0, supplierCost: 0 });
+  }, { quantity: 0, area: 0 });
   return { generatedAt: new Date().toISOString(), selectedSuppliers, rows, suppliers, total, singleSupplier: suppliers.length === 1 };
 }
 
 function OrderStatusMiniTable({ report }) {
   return (
     <div className="report-table order-status-report-table compact-report">
-      <div className="report-row order-status-report-row head"><span>المورد</span><span>رقم الإذن</span><span>العميل / المشروع</span><span>رقم الطلب</span><span>القطع</span><span>المساحة</span><span>التكلفة</span><span>الحالة</span></div>
+      <div className="report-row order-status-report-row head"><span>المورد</span><span>رقم الإذن</span><span>العميل / المشروع</span><span>رقم الطلب</span><span>القطع</span><span>المساحة</span><span>الحالة</span></div>
       {report.rows.slice(0, 16).map((row, index) => (
         <div className="report-row order-status-report-row" key={`${row.supplier}-${row.documentId}-${index}`}>
-          <span>{row.supplier}</span><span dir="ltr" className="keep-line">{row.documentId}</span><span>{[row.customer, row.project].filter(Boolean).join(" / ")}</span><span dir="ltr" className="keep-line">{row.orderNo}</span><span className="keep-line">{money(row.quantity)}</span><span className="keep-line">{square(row.area)}</span><span className="keep-line">{money(row.supplierCost)}</span><span>{row.statusText}</span>
+          <span>{row.supplier}</span><span dir="ltr" className="keep-line">{row.documentId}</span><span>{[row.customer, row.project].filter(Boolean).join(" / ")}</span><span dir="ltr" className="keep-line">{row.orderNo}</span><span className="keep-line">{money(row.quantity)}</span><span className="keep-line">{square(row.area)}</span><span>{row.statusText}</span>
         </div>
       ))}
-      {report.rows.length > 16 && <div className="report-row order-status-report-row subtotal"><span className="subtotal-label">والمزيد في التصدير الكامل</span><span>{report.rows.length - 16}</span><span></span><span></span><span></span></div>}
+      {report.rows.length > 16 && <div className="report-row order-status-report-row subtotal"><span className="subtotal-label">والمزيد في التصدير الكامل</span><span>{report.rows.length - 16}</span><span></span><span></span></div>}
     </div>
   );
 }
@@ -4332,18 +5137,18 @@ function OrderStatusReport({ report, currentUser, logoSrc }) {
         <span>إجمالي القطع: {money(report.total.quantity)}</span>
       </div>
       <div className="report-table order-status-report-table">
-        <div className="report-row order-status-report-row head"><span>رقم الإذن</span><span>العميل / المشروع</span><span>رقم الطلب</span><span>تاريخ الطلب</span><span>القطع</span><span>المساحة م2</span><span>تكلفة المورد</span><span>الحالة</span></div>
+        <div className="report-row order-status-report-row head"><span>رقم الإذن</span><span>العميل / المشروع</span><span>رقم الطلب</span><span>تاريخ الطلب</span><span>القطع</span><span>المساحة م2</span><span>الحالة</span></div>
         {report.suppliers.map((supplier) => (
           <React.Fragment key={supplier.supplier}>
             {supplier.rows.map((row, index) => (
               <div className="report-row order-status-report-row" key={`${row.supplier}-${row.documentId}-${index}`}>
-                <span dir="ltr" className="keep-line">{row.documentId}</span><span>{[row.customer, row.project].filter(Boolean).join(" / ")}</span><span dir="ltr" className="keep-line">{row.orderNo}</span><span dir="ltr" className="keep-line">{formatStatusDate(row.date)}</span><span className="keep-line">{money(row.quantity)}</span><span className="keep-line">{square(row.area)}</span><span className="keep-line">{money(row.supplierCost)}</span><span>{row.statusText}</span>
+                <span dir="ltr" className="keep-line">{row.documentId}</span><span>{[row.customer, row.project].filter(Boolean).join(" / ")}</span><span dir="ltr" className="keep-line">{row.orderNo}</span><span dir="ltr" className="keep-line">{formatStatusDate(row.date)}</span><span className="keep-line">{money(row.quantity)}</span><span className="keep-line">{square(row.area)}</span><span>{row.statusText}</span>
               </div>
             ))}
-            {!report.singleSupplier && <div className="report-row order-status-report-row subtotal"><span className="subtotal-label">إجمالي المورد {supplier.supplier}</span><span>{money(supplier.subtotal.quantity)}</span><span>{square(supplier.subtotal.area)}</span><span>{money(supplier.subtotal.supplierCost)}</span><span></span></div>}
+            {!report.singleSupplier && <div className="report-row order-status-report-row subtotal"><span className="subtotal-label">إجمالي المورد {supplier.supplier}</span><span>{money(supplier.subtotal.quantity)}</span><span>{square(supplier.subtotal.area)}</span><span></span></div>}
           </React.Fragment>
         ))}
-        <div className="report-row order-status-report-row total"><span className="subtotal-label">الإجمالي</span><span>{money(report.total.quantity)}</span><span>{square(report.total.area)}</span><span>{money(report.total.supplierCost)}</span><span></span></div>
+        <div className="report-row order-status-report-row total"><span className="subtotal-label">الإجمالي</span><span>{money(report.total.quantity)}</span><span>{square(report.total.area)}</span><span></span></div>
       </div>
       <ReportFooter currentUser={currentUser} />
     </div>
@@ -4358,7 +5163,7 @@ function SupplierReport({ supplier, data, currentUser, logoSrc }) {
       <ReportHeader title={`كشف حساب ${supplier.name}`} logoSrc={logoSrc} />
       <div className="report-table supplier-report-table">
         <div className="report-row supplier-report-row head"><span>التاريخ</span><span>البيان</span><span>مدين</span><span>دائن</span></div>
-        {orders.map((order) => <div className="report-row supplier-report-row" key={order.id}><span className="keep-line">{order.date}</span><span className="keep-line">{displayOrderNo(order.orderNo)} - {statusLabel(order.status)}</span><span className="keep-line">{money(orderTotals(order).supplierCost)}</span><span></span></div>)}
+        {orders.map((order) => <div className="report-row supplier-report-row" key={order.id}><span className="keep-line">{order.date}</span><span className="keep-line">{displayOrderNo(order.orderNo)} - إذن {orderDocumentId(order)} - {statusLabel(order.status)}</span><span className="keep-line">{money(orderTotals(order).supplierCost)}</span><span></span></div>)}
         {payments.map((payment) => <div className="report-row supplier-report-row" key={payment.id}><span className="keep-line">{payment.paid_at}</span><span>{payment.notes || payment.method || "دفعة"}</span><span></span><span className="keep-line">{money(payment.amount)}</span></div>)}
       </div>
       <ReportFooter currentUser={currentUser} />
@@ -4475,7 +5280,8 @@ function LogConsole({ title, logs, expanded, onToggle }) {
   );
 }
 
-function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, currentUser, data, setData, appearance, setAppearance, appLogoSrc, reportLogoSrc }) {
+function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, currentUser, data, setData, appearance, setAppearance, appLogoSrc, reportLogoSrc, onCheckUpdates, checkingUpdates }) {
+  const isAdmin = currentUser?.role === "admin";
   const [localApi, setLocalApi] = useState(localApiBase());
   const [useLocalServer, setUseLocalServer] = useState(localServerEnabled());
   const [sourceMode, setSourceMode] = useState(dataSourceMode());
@@ -4489,6 +5295,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
   const [serverLogExpanded, setServerLogExpanded] = useState(false);
   const [botLogs, setBotLogs] = useState([]);
   const [botStatus, setBotStatus] = useState({ running: false });
+  const [botSettings, setBotSettings] = useState(() => readBrowserBotSettings());
   const [botLogExpanded, setBotLogExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -4496,6 +5303,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
 
   useEffect(() => {
     readServerLogs();
+    readTelegramBotSettings();
     readTelegramBotStatus();
     const timer = window.setInterval(() => {
       readServerLogs();
@@ -4563,44 +5371,112 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     return result;
   }
 
-  async function readTelegramBotStatus() {
-    try {
-      const status = await localRequest("/api/telegram-bot/status", {}, 2500);
-      setBotStatus(status || { running: false });
-      setBotLogs(status?.logs || []);
-      return;
-    } catch {
-      // Fall back to Electron direct control when the local API is still starting.
-    }
-    if (!window.glassOrdersDesktop?.telegramBotStatus) {
-      setBotStatus({ running: false });
-      setBotLogs(["اضغط حفظ وتشغيل لتجهيز القاعدة المحلية أولاً، ثم شغل البوت من هنا."]);
-      return;
-    }
-    try {
-      const status = await window.glassOrdersDesktop.telegramBotStatus();
-      setBotStatus(status || { running: false });
-      setBotLogs(status?.logs || []);
-    } catch {
-      setBotStatus({ running: false });
+  function applyTelegramBotStatus(status) {
+    const safeStatus = status || { running: false };
+    setBotStatus(safeStatus);
+    setBotLogs(safeStatus.logs || []);
+    if (safeStatus.settings) {
+      setBotSettings(normalizePublicBotSettings(safeStatus.settings));
     }
   }
 
-  async function toggleTelegramBot() {
+  async function readTelegramBotSettings() {
+    if (!window.glassOrdersDesktop?.telegramBotSettings) {
+      setBotSettings(readBrowserBotSettings());
+      return;
+    }
+    try {
+      setBotSettings(normalizePublicBotSettings(await window.glassOrdersDesktop.telegramBotSettings()));
+    } catch {
+      setBotSettings(readBrowserBotSettings());
+    }
+  }
+
+  async function readTelegramBotStatus() {
+    if (window.glassOrdersDesktop?.telegramBotStatus) {
+      try {
+        applyTelegramBotStatus(await window.glassOrdersDesktop.telegramBotStatus());
+        return;
+      } catch {
+        applyTelegramBotStatus({ running: false });
+      }
+    }
+    try {
+      applyTelegramBotStatus(await localRequest("/api/telegram-bot/status", {}, 2500));
+    } catch {
+      applyTelegramBotStatus({ running: false });
+      setBotLogs(["اضغط حفظ وتشغيل لتجهيز القاعدة المحلية أولاً، ثم شغل البوت من هنا."]);
+    }
+  }
+
+  function requireAdminBotControl() {
+    if (isAdmin) return true;
+    setMessage("تشغيل وإيقاف بوت Telegram متاح للمدير فقط.");
+    return false;
+  }
+
+  function botSupabaseCredentials() {
+    const saved = supabaseConfig();
+    return {
+      supabaseUrl: (supabaseForm.url || saved.url || "").trim(),
+      supabaseKey: (supabaseForm.key || saved.key || "").trim()
+    };
+  }
+
+  async function saveBotStartupSettings(patch = {}) {
+    if (!requireAdminBotControl()) return;
+    const credentials = botSupabaseCredentials();
+    const nextPatch = { ...patch };
+    if (nextPatch.openAtLogin === true) {
+      nextPatch.enabled = true;
+      nextPatch.startHiddenAtLogin = true;
+    }
+    if (nextPatch.enabled === false) nextPatch.openAtLogin = false;
+    if ((nextPatch.enabled || nextPatch.openAtLogin) && (!credentials.supabaseUrl || !credentials.supabaseKey)) {
+      setMessage("احفظ إعدادات Supabase أولاً قبل تفعيل تشغيل البوت تلقائياً.");
+      return;
+    }
+    setBusy(true);
+    try {
+      let settings;
+      const settingsPatch = { ...nextPatch };
+      if (credentials.supabaseUrl && credentials.supabaseKey) Object.assign(settingsPatch, credentials);
+      if (window.glassOrdersDesktop?.updateTelegramBotSettings) {
+        settings = await window.glassOrdersDesktop.updateTelegramBotSettings(settingsPatch);
+      } else {
+        settings = saveBrowserBotSettings({ ...nextPatch, hasSupabase: !!(credentials.supabaseUrl && credentials.supabaseKey) });
+      }
+      const normalized = normalizePublicBotSettings(settings);
+      setBotSettings(normalized);
+      setBotStatus((current) => ({ ...current, settings: normalized }));
+      setMessage("تم حفظ إعدادات تشغيل بوت Telegram.");
+    } catch (error) {
+      setMessage(`تعذر حفظ إعدادات البوت: ${safeErrorMessage(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startTelegramBotFromSettings() {
+    if (!requireAdminBotControl()) return;
+    const credentials = botSupabaseCredentials();
+    if (!credentials.supabaseUrl || !credentials.supabaseKey) {
+      setMessage("احفظ إعدادات Supabase أولاً قبل تشغيل بوت Telegram.");
+      return;
+    }
     setBusy(true);
     try {
       let result;
-      const supabase = supabaseConfig();
-      if (window.glassOrdersDesktop) {
-        result = botStatus?.running
-          ? await window.glassOrdersDesktop?.stopTelegramBot?.()
-          : await window.glassOrdersDesktop?.startTelegramBot?.({ supabaseUrl: supabase.url, supabaseKey: supabase.key });
+      if (window.glassOrdersDesktop?.startTelegramBot) {
+        result = await window.glassOrdersDesktop.startTelegramBot({ ...credentials, remember: true });
       } else {
         try {
-          result = await localRequest(botStatus?.running ? "/api/telegram-bot/stop" : "/api/telegram-bot/start", {
+          result = await localRequest("/api/telegram-bot/start", {
             method: "POST",
-            body: JSON.stringify(botStatus?.running ? {} : { supabaseUrl: supabase.url, supabaseKey: supabase.key })
+            body: JSON.stringify(credentials)
           }, 8000);
+          const settings = saveBrowserBotSettings({ enabled: true, hasSupabase: true });
+          setBotSettings(settings);
         } catch (error) {
           if (/failed to fetch|network|refused/i.test(safeErrorMessage(error))) {
             throw new Error("الخادم المحلي غير يعمل الآن. افتح نسخة سطح المكتب أو اضغط حفظ وتشغيل في القاعدة المحلية أولاً.");
@@ -4608,11 +5484,40 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
           throw error;
         }
       }
-      setBotStatus(result || { running: false });
-      setBotLogs(result?.logs || []);
-      setMessage(result?.running ? "تم تشغيل بوت Telegram." : "تم إيقاف بوت Telegram.");
+      applyTelegramBotStatus(result || { running: true, settings: { ...botSettings, enabled: true, hasSupabase: true } });
+      setMessage("تم تشغيل بوت Telegram وتذكر الاختيار.");
     } catch (error) {
-      setMessage(`تعذر التحكم في بوت Telegram: ${safeErrorMessage(error)}`);
+      setMessage(`تعذر تشغيل بوت Telegram: ${safeErrorMessage(error)}`);
+    } finally {
+      setBusy(false);
+      await readTelegramBotStatus();
+    }
+  }
+
+  async function stopTelegramBotFromSettings() {
+    if (!requireAdminBotControl()) return;
+    setBusy(true);
+    try {
+      let result;
+      if (window.glassOrdersDesktop?.stopTelegramBot) {
+        result = await window.glassOrdersDesktop.stopTelegramBot({ remember: true });
+      } else {
+        try {
+          result = await localRequest("/api/telegram-bot/stop", { method: "POST", body: JSON.stringify({}) }, 8000);
+        } catch (error) {
+          if (/failed to fetch|network|refused/i.test(safeErrorMessage(error))) {
+            result = { running: false, logs: botLogs };
+          } else {
+            throw error;
+          }
+        }
+        const settings = saveBrowserBotSettings({ enabled: false, openAtLogin: false });
+        setBotSettings(settings);
+      }
+      applyTelegramBotStatus(result || { running: false, settings: { ...botSettings, enabled: false, openAtLogin: false } });
+      setMessage("تم إيقاف بوت Telegram وإلغاء تشغيله التلقائي.");
+    } catch (error) {
+      setMessage(`تعذر إيقاف بوت Telegram: ${safeErrorMessage(error)}`);
     } finally {
       setBusy(false);
       await readTelegramBotStatus();
@@ -4843,6 +5748,29 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
 
   return (
     <div className="settings-stack">
+      <section className="panel update-panel">
+        <div className="panel-head">
+          <div>
+            <h2><Download size={18} /> تحديث البرنامج</h2>
+            <p dir="ltr">Glass Orders v{VERSION}</p>
+          </div>
+          <div className="actions">
+            <button className="primary" type="button" onClick={onCheckUpdates} disabled={checkingUpdates}>
+              {checkingUpdates ? <Loader2 size={18} className="spin" /> : <RefreshCw size={18} />}
+              فحص التحديث
+            </button>
+            <button type="button" onClick={() => openReleasePage()}><Download size={18} />الإصدارات</button>
+          </div>
+        </div>
+        <div className="update-card">
+          <Monitor size={22} />
+          <div>
+            <strong>مصدر التحديثات الرسمي</strong>
+            <span dir="ltr">{RELEASES_URL}</span>
+          </div>
+        </div>
+      </section>
+
       <section className="panel">
         <div className="panel-head">
           <h2><Palette size={18} /> المظهر والهوية</h2>
@@ -4941,12 +5869,18 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
         <div className="panel-head">
           <div>
             <h2><Bot size={18} /> بوت Telegram</h2>
-            <p>تشغيل وإيقاف البوت من داخل البرنامج مع متابعة السجل الحي.</p>
+            <p>{isAdmin ? "تشغيل البوت للمدير فقط مع تذكر الاختيار وتشغيله في الخلفية." : "حالة البوت ظاهرة هنا، والتحكم متاح للمدير فقط."}</p>
           </div>
-          <button className={botStatus?.running ? "danger" : "primary"} onClick={toggleTelegramBot} disabled={busy}>
-            {botStatus?.running ? <PowerOff size={18} /> : <Power size={18} />}
-            {botStatus?.running ? "إيقاف البوت" : "تشغيل البوت"}
-          </button>
+          {isAdmin ? (
+            <div className="actions">
+              <button className="primary" type="button" onClick={startTelegramBotFromSettings} disabled={busy || botStatus?.running}>
+                <Power size={18} />تشغيل البوت
+              </button>
+              <button className="danger" type="button" onClick={stopTelegramBotFromSettings} disabled={busy || !botStatus?.running}>
+                <PowerOff size={18} />إيقاف البوت
+              </button>
+            </div>
+          ) : null}
         </div>
         <div className="settings-grid">
           <div className="server-card">
@@ -4956,6 +5890,36 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
               <span dir="ltr">{botStatus?.pid ? `PID ${botStatus.pid}` : "server/telegramBot.mjs"}</span>
             </div>
           </div>
+          {isAdmin ? (
+            <>
+              <label className="toggle-line">
+                <input
+                  type="checkbox"
+                  checked={botSettings.enabled}
+                  disabled={busy}
+                  onChange={(event) => saveBotStartupSettings(event.target.checked ? { enabled: true } : { enabled: false })}
+                />
+                تذكر تشغيل البوت عند فتح البرنامج
+              </label>
+              <label className="toggle-line">
+                <input
+                  type="checkbox"
+                  checked={botSettings.openAtLogin}
+                  disabled={busy || !botSettings.canOpenAtLogin || !botSettings.enabled}
+                  onChange={(event) => saveBotStartupSettings({ openAtLogin: event.target.checked })}
+                />
+                تشغيل مع Windows في الخلفية
+              </label>
+            </>
+          ) : (
+            <div className="server-card">
+              <KeyRound size={22} />
+              <div>
+                <strong>تحكم المدير فقط</strong>
+                <span>سجل الدخول بحساب مدير لتشغيل أو إيقاف بوت Telegram.</span>
+              </div>
+            </div>
+          )}
           <LogConsole title="سجل بوت Telegram" logs={botLogs} expanded={botLogExpanded} onToggle={() => setBotLogExpanded((value) => !value)} />
         </div>
       </section>
@@ -5099,9 +6063,13 @@ function Combo({ value, options, onChange, className = "", ...inputProps }) {
   const wrapRef = useRef(null);
   const inputClass = [inputProps.className, className].filter(Boolean).join(" ");
   const cleanOptions = useMemo(() => uniqueValues(options), [options]);
+  const query = cleanName(value).toLocaleLowerCase();
   const visibleOptions = useMemo(() => {
-    return cleanOptions.slice(0, 90);
-  }, [cleanOptions]);
+    const filtered = query
+      ? cleanOptions.filter((option) => cleanName(option).toLocaleLowerCase().includes(query))
+      : cleanOptions;
+    return filtered.slice(0, 90);
+  }, [cleanOptions, query]);
   useEffect(() => {
     function close(event) {
       if (!wrapRef.current?.contains(event.target)) setOpen(false);
@@ -5139,7 +6107,7 @@ function Combo({ value, options, onChange, className = "", ...inputProps }) {
       </button>
       {open && (
         <div className="combo-menu" role="listbox">
-          {visibleOptions.length === 0 && <button type="button" className="combo-option muted" onMouseDown={(event) => event.preventDefault()}>لا توجد قيم محفوظة</button>}
+          {visibleOptions.length === 0 && <button type="button" className="combo-option muted" onMouseDown={(event) => event.preventDefault()}>لا توجد قيم مطابقة</button>}
           {visibleOptions.map((option) => (
             <button key={option} type="button" className="combo-option" onMouseDown={(event) => event.preventDefault()} onClick={() => commit(option)}>
               {option}
@@ -5266,6 +6234,11 @@ function safeFileName(fileName) {
     .trim();
 }
 
+function orderExportFileBase(order) {
+  const customer = cleanName(order?.customerName) || "بدون عميل";
+  return `اوردر زجاج رقم ${displayOrderNo(order?.orderNo)} - عميل ${customer}`;
+}
+
 function waitForPaint(delay = 0) {
   return new Promise((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => window.setTimeout(resolve, delay)));
@@ -5343,7 +6316,7 @@ async function saveWorkbook(workbook, fileName) {
 
 async function exportOrderPdf(order, currentUser, logoSrc) {
   try {
-    return await renderReportPdf(<OrderReport order={order} currentUser={currentUser} logoSrc={logoSrc} />, `GlassOrder-${displayOrderNo(order.orderNo)}.pdf`);
+    return await renderReportPdf(<OrderReport order={order} currentUser={currentUser} logoSrc={logoSrc} />, `${orderExportFileBase(order)}.pdf`);
   } catch (error) {
     showExportError(error);
     return null;
@@ -5352,36 +6325,71 @@ async function exportOrderPdf(order, currentUser, logoSrc) {
 
 async function exportOrderExcel(order) {
   try {
-    const rows = order.rows.map((row, index) => {
+    const itemRows = order.rows.map((row, index) => {
       const totals = rowTotals(row);
-      return {
-        NO: index + 1,
-        "رقم الطلب": displayOrderNo(order.orderNo),
-        "رقم الإذن": order.documentId,
-        "العميل": order.customerName,
-        "المورد": order.supplierName,
-        "البيان": rowDescription(row),
-        "ملاحظات البيان": row.notes || "",
-        "الشركات": rowCompanyText(row),
-        "العرض سم": Math.max(...row.layers.map((layer) => numberValue(layer.width))),
-        "الطول سم": Math.max(...row.layers.map((layer) => numberValue(layer.height))),
-        "العدد": row.quantity,
-        "المساحة": totals.area,
-        "سعر طبقة 1": row.layers[0]?.unitPrice || 0,
-        "تكلفة طبقة 1": row.layers[0]?.supplierUnitPrice || 0,
-        "سعر طبقة 2": row.layers[1]?.unitPrice || "",
-        "تكلفة طبقة 2": row.layers[1]?.supplierUnitPrice || "",
-        "سعر المادة": row.materialUnitPrice || 0,
-        "تكلفة المادة": row.supplierMaterialUnitPrice || 0,
-        "إجمالي الفاتورة": totals.total,
-        "تكلفة المورد": totals.supplierCost,
-        "ملاحظات الرسم": drawingFabricationNotes(row).join(" | ") || (row.drawing?.shapes || []).map(drawingShapeSummary).join(" | "),
-        "حواف الرسم": drawingOutlineSummary(row.drawing)
-      };
+      return [
+        index + 1,
+        rowDescription(row),
+        rowCompanyText(row),
+        Math.max(...row.layers.map((layer) => numberValue(layer.width))),
+        Math.max(...row.layers.map((layer) => numberValue(layer.height))),
+        row.quantity,
+        Number(totals.area.toFixed(3)),
+        row.notes || ""
+      ];
     });
+    const totals = orderTotals(order);
+    const orderTitle = orderExportFileBase(order);
+    const sheetRows = [
+      [COMPANY.nameAr],
+      [orderTitle],
+      [],
+      ["رقم الطلب", displayOrderNo(order.orderNo), "التاريخ", order.date],
+      ["العميل", order.customerName || "", "المورد", order.supplierName || ""],
+      ["المشروع", order.project || "", "نوع الطلب", order.entryMode === "drawings" ? "طلب شراء برسم" : "طلب زجاج عادي"],
+      [],
+      ["م", "البيان", "الشركة", "العرض سم", "الطول سم", "العدد", "المساحة م2", "ملاحظات"],
+      ...itemRows,
+      [],
+      ["الإجمالي", "", "", "", "", totals.pieces, Number(totals.area.toFixed(3)), ""]
+    ];
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Glass Order");
-    return await saveWorkbook(wb, `GlassOrder-${displayOrderNo(order.orderNo)}.xlsx`);
+    const ws = XLSX.utils.aoa_to_sheet(sheetRows);
+    ws["!merges"] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
+      { s: { r: 1, c: 0 }, e: { r: 1, c: 7 } },
+      { s: { r: sheetRows.length - 1, c: 0 }, e: { r: sheetRows.length - 1, c: 4 } }
+    ];
+    ws["!cols"] = [
+      { wch: 8 },
+      { wch: 42 },
+      { wch: 24 },
+      { wch: 12 },
+      { wch: 12 },
+      { wch: 10 },
+      { wch: 12 },
+      { wch: 34 }
+    ];
+    XLSX.utils.book_append_sheet(wb, ws, "طلب الشراء");
+    if (order.entryMode === "drawings" || order.rows.some((row) => drawingHasContent(row.drawing))) {
+      const drawingRows = [
+        ["رقم الصف", "البيان", "الطبقات", "الحواف", "ملاحظات الرسم"],
+        ...order.rows.map((row, index) => {
+          const notes = drawingFabricationNotes(row);
+          return [
+            index + 1,
+            rowDescription(row),
+            row.layers.map((layer, layerIndex) => layerReportDescription(layer, layerIndex)).join(" | "),
+            drawingOutlineSummary(row.drawing),
+            notes.length ? notes.join(" | ") : "لوح مسطح بدون قص أو ثقوب إضافية."
+          ];
+        })
+      ];
+      const drawingSheet = XLSX.utils.aoa_to_sheet(drawingRows);
+      drawingSheet["!cols"] = [{ wch: 10 }, { wch: 42 }, { wch: 58 }, { wch: 44 }, { wch: 72 }];
+      XLSX.utils.book_append_sheet(wb, drawingSheet, "رسومات");
+    }
+    return await saveWorkbook(wb, `${orderTitle}.xlsx`);
   } catch (error) {
     showExportError(error);
     return null;
@@ -5412,6 +6420,7 @@ async function exportSupplierExcel(supplier, data) {
       .map((order) => ({
         "التاريخ": order.date,
         "النوع": "طلب مورد",
+        "رقم إذن المورد": orderDocumentId(order),
         "البيان": `${displayOrderNo(order.orderNo)} - ${statusLabel(order.status)} - ${order.project || ""}`,
         "مدين": orderTotals(order).supplierCost,
         "دائن": 0
@@ -5453,7 +6462,6 @@ async function exportOrderStatusExcel(report) {
       "تاريخ الطلب": row.date,
       "القطع": row.quantity,
       "المساحة": row.area,
-      "تكلفة المورد": row.supplierCost,
       "الحالة": row.statusText || statusLabel(row.status),
       "نوع الزجاج": row.glass,
       "ملاحظات": row.notes

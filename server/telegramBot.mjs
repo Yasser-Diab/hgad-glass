@@ -82,6 +82,11 @@ function cleanCode(value) {
   return digits.replace(/^0+/, "") || "0";
 }
 
+function digitsOnlyMessage(value) {
+  const text = toLatinDigits(value).trim();
+  return /^\d+$/.test(text) ? text : "";
+}
+
 function codesMatch(value, query) {
   const cleanQuery = cleanCode(query);
   return !!cleanQuery && cleanCode(value) === cleanQuery;
@@ -133,18 +138,27 @@ function chatThreadKey(chatId, threadId = 0) {
 function rememberForumTopic(message) {
   const chatId = message?.chat?.id;
   const threadId = Number(message?.message_thread_id || 0);
-  const createdName = message?.forum_topic_created?.name || message?.forum_topic_edited?.name || "";
+  const createdName = message?.forum_topic_created?.name ||
+    message?.forum_topic_edited?.name ||
+    message?.reply_to_message?.forum_topic_created?.name ||
+    message?.reply_to_message?.forum_topic_edited?.name ||
+    "";
   if (!chatId || !threadId || !createdName) return;
   topicThreadByChat.set(chatThreadKey(chatId, normalizeArabic(createdName)), threadId);
 }
 
-function topicThreadId(message) {
-  const chatId = message?.chat?.id;
+function targetTopicThreadId(chatId) {
   if (configuredTopicThreadId) return configuredTopicThreadId;
-  const messageThreadId = Number(message?.message_thread_id || message?.reply_to_message?.message_thread_id || 0);
-  if (messageThreadId) return messageThreadId;
   if (!chatId) return 0;
   return topicThreadByChat.get(chatThreadKey(chatId, normalizeArabic(telegramTopicName))) || 0;
+}
+
+function isAllowedTopicMessage(message) {
+  const chatId = message?.chat?.id;
+  const messageThreadId = Number(message?.message_thread_id || message?.reply_to_message?.message_thread_id || 0);
+  if (!chatId || !messageThreadId) return false;
+  const targetThreadId = targetTopicThreadId(chatId);
+  return !!targetThreadId && messageThreadId === targetThreadId;
 }
 
 function threadExtra(threadId, extra = {}) {
@@ -422,74 +436,17 @@ async function sendDocument(chatId, filePath, caption, threadId = 0) {
 async function handleMessage(message) {
   const chatId = message.chat?.id;
   rememberForumTopic(message);
-  const threadId = topicThreadId(message);
+  if (!isAllowedTopicMessage(message)) return;
+  const threadId = targetTopicThreadId(chatId);
   const text = String(message.text || "").trim();
-  if (!chatId || !text) return;
-  if (text === "/start") {
-    await sendMessage(chatId, `HGAD Glass Orders Bot\n\nمصدر البيانات الحالي: ${dataSource}\nاكتب رقم الإذن أو رقم الطلب.\nمثال: 525 أو GO-000525\n\n/report لاستخراج تقرير مورد.`, threadExtra(threadId));
-    return;
-  }
-  if (text === "/reload") {
-    const count = await loadDataSource();
-    await sendMessage(chatId, `تم تحديث البيانات من ${dataSource}.\nعدد الصفوف: ${count}\nآخر تحديث: ${lastLoadedAt}`, threadExtra(threadId));
-    return;
-  }
-  if (text === "/report") {
-    const list = suppliers();
-    if (!list.length) {
-      await sendMessage(chatId, "لا توجد قائمة موردين في ملف Excel.", threadExtra(threadId));
-      return;
-    }
-    await sendMessage(chatId, "اختر المورد:", {
-      ...threadExtra(threadId),
-      reply_markup: {
-        inline_keyboard: list.slice(0, 80).map((supplier, index) => [callbackButton(supplier.slice(0, 48), `supplier|${index}`)])
-      }
-    });
-    return;
-  }
-  if (!cleanCode(text)) return;
-  const matches = orderMatches(text);
-  await sendMessage(chatId, matches.length ? searchReply(text, matches) : "لا توجد بيانات لهذا الرقم.", threadExtra(threadId));
+  const code = digitsOnlyMessage(text);
+  if (!chatId || !code) return;
+  const matches = orderMatches(code);
+  await sendMessage(chatId, matches.length ? searchReply(code, matches) : "لا توجد بيانات لهذا الرقم.", threadExtra(threadId));
 }
 
 async function handleCallback(query) {
-  const chatId = query.message?.chat?.id;
-  const threadId = topicThreadId(query.message);
-  const data = String(query.data || "");
-  if (!chatId) return;
-  await telegramJson("answerCallbackQuery", { callback_query_id: query.id }).catch(() => null);
-  if (data.startsWith("supplier|")) {
-    const index = Number(data.split("|")[1]);
-    const supplier = suppliers()[index];
-    if (!supplier) {
-      await sendMessage(chatId, "لم أجد هذا المورد في القائمة الحالية.", threadExtra(threadId));
-      return;
-    }
-    selectedSupplierByChat.set(chatThreadKey(chatId, threadId), supplier);
-    await sendMessage(chatId, `تم اختيار المورد:\n${supplier}`, {
-      ...threadExtra(threadId),
-      reply_markup: {
-        inline_keyboard: [[callbackButton("PDF", "export|pdf"), callbackButton("Excel", "export|excel")]]
-      }
-    });
-    return;
-  }
-  if (data.startsWith("export|")) {
-    const supplier = selectedSupplierByChat.get(chatThreadKey(chatId, threadId));
-    if (!supplier) {
-      await sendMessage(chatId, "اختر المورد أولاً من /report.", threadExtra(threadId));
-      return;
-    }
-    const rows = supplierReportRows(supplier);
-    if (!rows.length) {
-      await sendMessage(chatId, "لا توجد أوامر غير مستلمة لهذا المورد.", threadExtra(threadId));
-      return;
-    }
-    const format = data.split("|")[1];
-    const filePath = format === "pdf" ? await createSupplierPdf(supplier, rows) : createSupplierExcel(supplier, rows);
-    await sendDocument(chatId, filePath, `تقرير ${supplier} - ${rows.length} صف`, threadId);
-  }
+  return;
 }
 
 async function handleUpdate(update) {
@@ -520,7 +477,7 @@ async function main() {
       const updates = await telegramJson("getUpdates", {
         timeout: 25,
         offset,
-        allowed_updates: ["message", "callback_query"]
+        allowed_updates: ["message"]
       });
       for (const update of updates || []) {
         offset = Math.max(offset, Number(update.update_id) + 1);

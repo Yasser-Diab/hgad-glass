@@ -312,6 +312,17 @@ async function saveOrder(order, shouldBootstrap = true) {
   return shouldBootstrap ? bootstrap() : null;
 }
 
+async function deleteOrder(identifier) {
+  const key = clean(identifier);
+  if (!key) throw new Error("لا يوجد رقم طلب صالح للحذف.");
+  const existing = await db.query("select id from glass_orders where id = $1 or order_no = $1 limit 1", [key]);
+  const orderId = existing.rows[0]?.id;
+  if (!orderId) throw new Error("الطلب غير موجود.");
+  await db.query("delete from glass_order_rows where order_id = $1", [orderId]);
+  await db.query("delete from glass_orders where id = $1", [orderId]);
+  return bootstrap();
+}
+
 async function importExcel(filePath = workbookPath) {
   await db.exec("delete from glass_order_rows; delete from glass_orders; delete from customers; delete from suppliers;");
   const workbook = XLSX.readFile(filePath, { cellDates: true });
@@ -506,6 +517,9 @@ app.put("/api/users/:id/password", async (req, res) => {
 });
 app.post("/api/orders", async (req, res) => {
   try { res.json(await saveOrder(req.body)); } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.delete("/api/orders/:id", async (req, res) => {
+  try { res.json(await deleteOrder(req.params.id)); } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post("/api/payments", async (req, res) => {
   try {

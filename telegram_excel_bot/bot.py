@@ -121,6 +121,25 @@ SHEET_NAME = (
     "الادخال"
 )
 
+TELEGRAM_TOPIC_NAME = (
+    os.getenv("TELEGRAM_TOPIC_NAME")
+    or
+    "متابعة الكلف"
+)
+
+try:
+    TELEGRAM_TOPIC_ID = int(
+        os.getenv("TELEGRAM_TOPIC_ID")
+        or
+        os.getenv("TELEGRAM_MESSAGE_THREAD_ID")
+        or
+        "0"
+    )
+except ValueError:
+    TELEGRAM_TOPIC_ID = 0
+
+TOPIC_THREADS_BY_CHAT = {}
+
 # ==========================================
 # ARABIC NORMALIZE
 # ==========================================
@@ -156,6 +175,55 @@ def norm_ar(s):
         s = s.replace(g, "")
 
     return s.translate(TRANS).strip()
+
+ARABIC_DIGITS = str.maketrans({
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+    "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+    "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4",
+    "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9",
+})
+
+def to_latin_digits(value):
+    return str(value or "").translate(ARABIC_DIGITS)
+
+def digits_only_message(value):
+    text = to_latin_digits(value).strip()
+    return text if text.isdigit() else ""
+
+def remember_forum_topic(message):
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    thread_id = getattr(message, "message_thread_id", None)
+    created = getattr(message, "forum_topic_created", None)
+    edited = getattr(message, "forum_topic_edited", None)
+    reply = getattr(message, "reply_to_message", None)
+    reply_created = getattr(reply, "forum_topic_created", None) if reply else None
+    topic_name = (
+        getattr(created, "name", None)
+        or getattr(edited, "name", None)
+        or getattr(reply_created, "name", None)
+        or ""
+    )
+    if chat_id and thread_id and topic_name:
+        TOPIC_THREADS_BY_CHAT[(chat_id, norm_ar(topic_name))] = int(thread_id)
+
+def target_topic_thread_id(chat_id):
+    if TELEGRAM_TOPIC_ID:
+        return TELEGRAM_TOPIC_ID
+    return TOPIC_THREADS_BY_CHAT.get((chat_id, norm_ar(TELEGRAM_TOPIC_NAME)), 0)
+
+def is_allowed_topic(update):
+    message = update.effective_message
+    if not message:
+        return False
+    remember_forum_topic(message)
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    thread_id = getattr(message, "message_thread_id", None)
+    if not chat_id or not thread_id:
+        return False
+    target = target_topic_thread_id(chat_id)
+    return bool(target and int(thread_id) == int(target))
 
 # ==========================================
 # FIND COLUMNS
@@ -194,7 +262,7 @@ def find_col_by_tokens(df, tokens):
 
 def clean_code(value):
 
-    text = str(value or "").strip().upper()
+    text = to_latin_digits(value).strip().upper()
     text = text.replace("GO-", "").replace("GO", "")
     text = "".join(ch for ch in text if ch.isdigit())
 
@@ -258,15 +326,7 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
-    msg = (
-        "🤖 HGAD BOT\n\n"
-        "ابعت رقم إذن فقط 🔢\n"
-        "أو استخدم:\n"
-        "/report"
-    )
-
-    await update.message.reply_text(msg)
+    return
 
 # ==========================================
 # RELOAD
@@ -276,17 +336,7 @@ async def reload_cmd(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
-    global df_main
-
-    new_df = load_dataframe()
-
-    if not new_df.empty:
-        df_main = new_df
-
-    await update.message.reply_text(
-        "♻️ تم تحديث البيانات"
-    )
+    return
 
 # ==========================================
 # SEARCH
@@ -299,12 +349,16 @@ async def handle_search(
 
     global df_main
 
+    if not is_allowed_topic(update):
+        return
+
     text = (
         update.message.text or ""
     ).strip()
 
-    # Accept supplier permit numbers, Excel order numbers, and app codes like GO-0123.
-    if not clean_code(text):
+    text = digits_only_message(text)
+
+    if not text:
         return
 
     if df_main.empty:
@@ -501,28 +555,7 @@ async def hosr_cmd(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
-
-    suppliers = get_suppliers()
-
-    keyboard = []
-
-    for s in suppliers:
-
-        keyboard.append([
-            InlineKeyboardButton(
-                s,
-                callback_data=f"supplier|{s}"
-            )
-        ])
-
-    reply_markup = InlineKeyboardMarkup(
-        keyboard
-    )
-
-    await update.message.reply_text(
-        "اختر المورد",
-        reply_markup=reply_markup
-    )
+    return
 
 # ==========================================
 # SUPPLIER CALLBACK
@@ -534,28 +567,7 @@ async def supplier_callback(
 ):
 
     query = update.callback_query
-
-    await query.answer()
-
-    supplier = query.data.split("|")[1]
-
-    context.user_data["supplier"] = supplier
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "PDF",
-                callback_data="export|pdf"
-            )
-        ]
-    ]
-
-    await query.message.reply_text(
-        f"تم اختيار المورد:\n{supplier}",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        )
-    )
+    return
 
 # ==========================================
 # CREATE PDF
@@ -663,31 +675,7 @@ async def export_callback(
 ):
 
     query = update.callback_query
-
-    await query.answer()
-
-    supplier = context.user_data.get(
-        "supplier"
-    )
-
-    try:
-
-        pdf_path = create_excel_pdf(
-            supplier
-        )
-
-        await query.message.reply_document(
-            document=open(pdf_path, "rb"),
-            filename=os.path.basename(pdf_path)
-        )
-
-    except Exception as e:
-
-        logging.exception(e)
-
-        await query.message.reply_text(
-            f"حصل خطأ:\n{e}"
-        )
+    return
 
 # ==========================================
 # ERROR HANDLER

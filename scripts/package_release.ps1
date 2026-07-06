@@ -18,6 +18,10 @@ $webDir = Join-Path $releaseDir "web"
 New-Item -ItemType Directory -Force -Path $webDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $root "dist") -Destination $webDir -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "supabase") -Destination $releaseDir -Recurse -Force
+$supabaseTemp = Join-Path $releaseDir "supabase\.temp"
+if (Test-Path $supabaseTemp) {
+  Remove-Item -LiteralPath $supabaseTemp -Recurse -Force
+}
 Copy-Item -LiteralPath (Join-Path $root "icons") -Destination $releaseDir -Recurse -Force
 
 $installer = Get-ChildItem -Path (Join-Path $root "dist-installer") -Filter "GlassOrders-Setup-*.exe" -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
