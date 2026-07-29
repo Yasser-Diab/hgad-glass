@@ -1,6 +1,6 @@
 {
   "appId": "com.hgad.glassorders",
-  "appName": "Glass Orders",
+  "appName": "Y.D Glass Manager",
   "webDir": "dist",
   "server": {
     "androidScheme": "https"

@@ -1,55 +1,130 @@
 {
-  "name": "glass-orders",
-  "version": "0.1.0",
-  "description": "Glass Orders, Suppliers management And Glass Cost.",
-  "author": "Yasser Diab",
+  "name": "yd-glass-manager",
+  "version": "0.1.9",
+  "description": "Glass Orders, Suppliers & Manufacturing",
+  "author": "Y.D Software",
   "private": true,
+  "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5174",
     "local:server": "node server/index.mjs",
-    "build:web": "vite build --emptyOutDir",
+    "build:web": "vite build --mode full --emptyOutDir --outDir dist",
+    "build:status": "vite build --mode status --emptyOutDir --outDir dist-status",
     "dist:win": "npm run build:web && electron-builder --win nsis",
     "android:add": "cap add android",
     "android:sync": "npm run build:web && cap sync android",
-    "android:debug": "npm run android:sync && cd android && gradlew.bat assembleDebug",
-    "android:release": "npm run android:sync && powershell -ExecutionPolicy Bypass -File scripts/build_android_release.ps1",
-    "package:release": "powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1"
+    "android:sync:full": "npm run build:web && cap sync android",
+    "android:sync:status": "npm run build:status && powershell -ExecutionPolicy Bypass -File scripts/sync_android_status_assets.ps1",
+    "android:debug": "npm run android:sync && powershell -ExecutionPolicy Bypass -File scripts/build_android_debug.ps1",
+    "android:release": "powershell -ExecutionPolicy Bypass -File scripts/build_android_release.ps1",
+    "brand:assets": "electron scripts/generate_brand_assets.cjs",
+    "test": "node --test tests/*.test.mjs",
+    "release:prepare": "powershell -ExecutionPolicy Bypass -File scripts/package_release.ps1",
+    "package:release": "npm run dist:win && npm run android:release && npm run release:prepare"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.3",
     "@capacitor/core": "^7.4.3",
     "@capacitor/filesystem": "^7.1.8",
-    "@supabase/server": "^1.2.0",
-    "@supabase/ssr": "^0.12.0",
+    "@capacitor/share": "^7.0.4",
+    "@electric-sql/pglite": "^0.5.4",
     "@supabase/supabase-js": "^2.110.0",
-    "@vitejs/plugin-react": "^5.1.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "html2canvas": "^1.4.1",
-    "jspdf": "^3.0.4",
+    "jspdf": "^4.2.1",
     "lucide-react": "^0.561.0",
+    "qrcode": "^1.5.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "vite": "^7.2.7",
-    "xlsx": "^0.18.5"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.4.3",
-    "@electric-sql/pglite": "^0.5.3",
+    "@vitejs/plugin-react": "^5.2.0",
     "electron": "^39.2.7",
     "electron-builder": "^26.1.0",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "vite": "^7.3.6"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.8",
+    "dompurify": "3.4.12",
+    "nanoid": "3.3.16",
+    "postcss": "8.5.25"
   },
   "build": {
     "appId": "com.hgad.glassorders",
-    "productName": "Glass Orders",
+    "productName": "Y.D Glass Manager",
     "electronDist": "node_modules/electron/dist",
     "asar": true,
     "asarUnpack": [
-      "server/**/*",
-      "telegram_excel_bot/**/*",
-      "طلب شراء زجاج.xlsm"
+      "server/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "server",
+        "to": "server",
+        "filter": [
+          "telegramBot.mjs"
+        ]
+      },
+      {
+        "from": "telegram_excel_bot",
+        "to": "telegram_excel_bot",
+        "filter": [
+          "Cairo-Regular.ttf",
+          "طلب شراء زجاج.xlsm"
+        ]
+      },
+      {
+        "from": "telegram_excel_bot/طلب شراء زجاج.xlsm",
+        "to": "طلب شراء زجاج.xlsm"
+      },
+      {
+        "from": "node_modules",
+        "to": "node_modules",
+        "filter": [
+          "@babel/runtime/**",
+          "@supabase/**",
+          "@types/pako/**",
+          "@types/raf/**",
+          "@types/trusted-types/**",
+          "adler-32/**",
+          "base64-arraybuffer/**",
+          "canvg/**",
+          "cfb/**",
+          "codepage/**",
+          "cookie/**",
+          "core-js/**",
+          "crc-32/**",
+          "css-line-break/**",
+          "dompurify/**",
+          "fast-png/**",
+          "fflate/**",
+          "frac/**",
+          "html2canvas/**",
+          "iceberg-js/**",
+          "iobuffer/**",
+          "jose/**",
+          "jspdf/**",
+          "pako/**",
+          "performance-now/**",
+          "raf/**",
+          "regenerator-runtime/**",
+          "rgbcolor/**",
+          "ssf/**",
+          "stackblur-canvas/**",
+          "svg-pathdata/**",
+          "text-segmentation/**",
+          "tslib/**",
+          "utrie/**",
+          "wmf/**",
+          "word/**",
+          "xlsx/**"
+        ]
+      }
     ],
     "directories": {
       "output": "dist-installer"
@@ -58,15 +133,13 @@
       "dist/**/*",
       "electron/**/*",
       "server/**/*",
-      "telegram_excel_bot/**/*",
       "icons/**/*",
-      "app_logo.png",
-      "طلب شراء زجاج.xlsm",
       "supabase/**/*",
       "package.json"
     ],
     "win": {
       "icon": "icons/app-icon.ico",
+      "executableName": "YDGlassManager",
       "requestedExecutionLevel": "asInvoker",
       "target": [
         {
@@ -76,15 +149,17 @@
           ]
         }
       ],
-      "artifactName": "GlassOrders-Setup-${version}.${ext}"
+      "artifactName": "YD-Glass-Manager-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "perMachine": false,
-      "allowElevation": false
+      "allowElevation": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
     }
   }
 }

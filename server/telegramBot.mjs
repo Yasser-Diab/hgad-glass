@@ -51,12 +51,20 @@ const workbookPath = env.EXCEL_FILE || env.GLASS_ORDERS_WORKBOOK_PATH || path.jo
 const sheetName = env.SHEET_NAME || "الادخال";
 const supabaseUrl = env.VITE_SUPABASE_URL || env.SUPABASE_URL || "";
 const supabaseKey = env.VITE_SUPABASE_ANON_KEY || env.SUPABASE_ANON_KEY || "";
+const supabaseBotEmail = env.TELEGRAM_SUPABASE_EMAIL || "";
+const supabaseBotPassword = env.TELEGRAM_SUPABASE_PASSWORD || "";
 const telegramTopicName = env.TELEGRAM_TOPIC_NAME || "متابعة الكلف";
 const configuredTopicThreadId = Number(env.TELEGRAM_TOPIC_ID || env.TELEGRAM_MESSAGE_THREAD_ID || 0) || 0;
 const topicThreadByChat = new Map();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(attempt) {
+  const base = Math.min(120000, 3000 * (2 ** Math.max(0, attempt - 1)));
+  const jitter = Math.floor(Math.random() * Math.min(5000, base * 0.25));
+  return base + jitter;
 }
 
 function normalizeArabic(value) {
@@ -196,11 +204,31 @@ function rowGlassDescription(row) {
 }
 
 async function loadSupabase() {
-  if (!supabaseUrl || !supabaseKey) throw new Error("Supabase config is missing.");
+  if (!supabaseUrl || !supabaseKey || !supabaseBotEmail || !supabaseBotPassword) {
+    throw new Error("Supabase bot authentication is incomplete. Set URL, anon key, TELEGRAM_SUPABASE_EMAIL, and TELEGRAM_SUPABASE_PASSWORD.");
+  }
   const client = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  const authResult = await client.auth.signInWithPassword({
+    email: supabaseBotEmail,
+    password: supabaseBotPassword
+  });
+  if (authResult.error || !authResult.data?.user?.id) {
+    throw authResult.error || new Error("Supabase bot login failed.");
+  }
+  const profileResult = await client
+    .from("users")
+    .select("role, can_view_costs, is_active")
+    .eq("auth_user_id", authResult.data.user.id)
+    .maybeSingle();
+  if (profileResult.error) throw profileResult.error;
+  const profile = profileResult.data;
+  if (!profile?.is_active) throw new Error("Supabase bot profile is not active.");
+  if (profile.role !== "admin" && profile.can_view_costs !== true) {
+    throw new Error("Supabase bot profile does not have cost-view permission.");
+  }
   const [orders, rows] = await Promise.all([
-    supabaseSelectAll(client, "glass_orders", "*", (query) => query.order("order_date", { ascending: false })),
-    supabaseSelectAll(client, "glass_order_rows", "*", (query) => query.order("line_no"))
+    supabaseRpcAll(client, "load_glass_orders"),
+    supabaseRpcAll(client, "load_glass_order_rows")
   ]);
   const byOrder = new Map();
   for (const row of rows || []) {
@@ -240,12 +268,11 @@ async function loadSupabase() {
   return workbookRows.length;
 }
 
-async function supabaseSelectAll(client, table, columns = "*", configure = (query) => query) {
+async function supabaseRpcAll(client, functionName, args = {}) {
   const pageSize = 1000;
   const rows = [];
   for (let from = 0; ; from += pageSize) {
-    const to = from + pageSize - 1;
-    const result = await configure(client.from(table).select(columns)).range(from, to);
+    const result = await client.rpc(functionName, args).range(from, from + pageSize - 1);
     if (result.error) throw result.error;
     rows.push(...(result.data || []));
     if (!result.data || result.data.length < pageSize) break;
@@ -254,12 +281,9 @@ async function supabaseSelectAll(client, table, columns = "*", configure = (quer
 }
 
 async function loadDataSource() {
-  try {
-    return await loadSupabase();
-  } catch (error) {
-    console.error(`Supabase bot source unavailable, falling back to Excel: ${error.message}`);
-    return loadWorkbook();
-  }
+  const supabaseConfigured = !!(supabaseUrl || supabaseKey || supabaseBotEmail || supabaseBotPassword);
+  if (supabaseConfigured) return loadSupabase();
+  return loadWorkbook();
 }
 
 function suppliers() {
@@ -471,7 +495,9 @@ async function main() {
     console.error(`deleteWebhook warning: ${error.message}`);
   });
   console.log("Telegram bot polling started.");
+  console.log("BOT_STATUS:running");
   let offset = 0;
+  let retryAttempt = 0;
   while (!stopRequested) {
     try {
       const updates = await telegramJson("getUpdates", {
@@ -479,15 +505,24 @@ async function main() {
         offset,
         allowed_updates: ["message"]
       });
+      if (retryAttempt > 0) {
+        console.log("Telegram bot polling reconnected.");
+        console.log("BOT_STATUS:running");
+      }
+      retryAttempt = 0;
       for (const update of updates || []) {
         offset = Math.max(offset, Number(update.update_id) + 1);
         await handleUpdate(update);
       }
     } catch (error) {
-      console.error(`Telegram polling error: ${error.message}`);
-      await sleep(5000);
+      retryAttempt += 1;
+      const delay = retryDelayMs(retryAttempt);
+      console.error(`Telegram polling error: ${error.message}. Reconnecting in ${Math.round(delay / 1000)}s.`);
+      console.log("BOT_STATUS:reconnecting");
+      await sleep(delay);
     }
   }
+  console.log("BOT_STATUS:stopped");
   console.log("Telegram bot polling stopped.");
 }
 

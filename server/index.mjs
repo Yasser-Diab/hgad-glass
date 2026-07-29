@@ -3,9 +3,12 @@ import cors from "cors";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { randomBytes, scrypt as nodeScrypt, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import XLSX from "xlsx";
+import { validateLocalOrderStatusPatch } from "./orderStatusValidation.mjs";
+import { mergeProtectedLocalOrderRows } from "./protectedCostMerge.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -18,23 +21,170 @@ fs.mkdirSync(dataDir, { recursive: true });
 const db = new PGlite(dataDir);
 const app = express();
 let telegramBotProcess = null;
+let httpServer = null;
+let shuttingDown = false;
+let localAdminSetupInProgress = false;
 const telegramBotLogs = [];
+const localSessions = new Map();
+const LOCAL_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
-app.use(cors({ origin: true }));
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || origin === "null" || /^file:\/\//i.test(origin) || /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error("Origin is not allowed by the local API."));
+  }
+}));
 app.use(express.json({ limit: "25mb" }));
 
 const gid = (prefix = "id") => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 const clean = (value) => String(value ?? "").trim();
+const normalizedUsername = (value) => clean(value).toLocaleLowerCase();
+const httpError = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const num = (value, fallback = 0) => {
+  if (value === "" || value === null || value === undefined) return fallback;
   const n = Number(String(value ?? "").replace(",", "."));
-  return Number.isFinite(n) ? n : fallback;
+  if (!Number.isFinite(n)) throw new Error("قيمة رقمية غير صالحة. راجع الأرقام المدخلة قبل الحفظ.");
+  return n;
 };
+const parseJson = (value, fallback) => {
+  if (value && typeof value === "object") return value;
+  try {
+    return JSON.parse(value || JSON.stringify(fallback));
+  } catch {
+    return fallback;
+  }
+};
+
+function validateLocalPassword(password) {
+  const value = String(password || "");
+  if (value.length < 10) throw new Error("يجب ألا تقل كلمة المرور عن 10 أحرف.");
+  if (value.length > 1024) throw new Error("كلمة المرور أطول من الحد المسموح.");
+  return value;
+}
+
+function scrypt(password, salt, keyLength = 64, options = {}) {
+  return new Promise((resolve, reject) => {
+    nodeScrypt(password, salt, keyLength, options, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey);
+    });
+  });
+}
+
+async function hashLocalPassword(password) {
+  const safePassword = validateLocalPassword(password);
+  const salt = randomBytes(16);
+  const options = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+  const derivedKey = await scrypt(safePassword, salt, 64, options);
+  return `scrypt$${options.N}$${options.r}$${options.p}$${salt.toString("base64")}$${derivedKey.toString("base64")}`;
+}
+
+async function verifyLocalPassword(password, encodedHash) {
+  try {
+    const [algorithm, nText, rText, pText, saltText, hashText] = String(encodedHash || "").split("$");
+    if (algorithm !== "scrypt" || !saltText || !hashText) return false;
+    const expected = Buffer.from(hashText, "base64");
+    if (!expected.length) return false;
+    const actual = await scrypt(String(password || ""), Buffer.from(saltText, "base64"), expected.length, {
+      N: Number(nText),
+      r: Number(rText),
+      p: Number(pText),
+      maxmem: 64 * 1024 * 1024
+    });
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+function createLocalSession(user) {
+  const token = randomBytes(32).toString("base64url");
+  localSessions.set(token, {
+    userId: user.id,
+    role: user.role,
+    canViewCosts: user.role === "admin" || user.can_view_costs === true,
+    expiresAt: Date.now() + LOCAL_SESSION_TTL_MS
+  });
+  return token;
+}
+
+function localBearerToken(req) {
+  return String(req.headers.authorization || "").match(/^Bearer\s+(.+)$/i)?.[1] || "";
+}
+
+function authenticatedLocalSession(req) {
+  const token = localBearerToken(req);
+  const session = token ? localSessions.get(token) : null;
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    localSessions.delete(token);
+    return null;
+  }
+  session.expiresAt = Date.now() + LOCAL_SESSION_TTL_MS;
+  return { token, ...session };
+}
+
+function updateLocalSessionsForUser(user) {
+  for (const [token, session] of localSessions.entries()) {
+    if (session.userId !== user.id) continue;
+    if (user.is_active === false) {
+      localSessions.delete(token);
+      continue;
+    }
+    session.role = user.role;
+    session.canViewCosts = user.role === "admin" || user.can_view_costs === true;
+  }
+}
+
+function requireLocalAdmin(req, res) {
+  if (req.localSession?.role === "admin") return true;
+  res.status(403).json({ error: "هذه العملية متاحة لمدير النظام فقط." });
+  return false;
+}
+
+app.use("/api", (req, res, next) => {
+  if (req.path === "/health" || req.path === "/auth/login" || req.path === "/auth/setup") {
+    next();
+    return;
+  }
+  const session = authenticatedLocalSession(req);
+  if (!session) {
+    res.status(401).json({ error: "انتهت جلسة الخادم المحلي. سجّل الدخول مرة أخرى." });
+    return;
+  }
+  req.localSession = session;
+  next();
+});
 
 function displayOrderNo(value) {
   const match = String(value || "").match(/GO-\s*(\d+)/i) || String(value || "").match(/^(\d+)$/);
   const sequence = match ? Number(match[1]) : null;
   if (!Number.isFinite(sequence)) return `${orderPrefix}${String(1).padStart(orderSequenceWidth, "0")}`;
   return `${orderPrefix}${String(sequence).padStart(orderSequenceWidth, "0")}`;
+}
+
+function orderSequence(value) {
+  const match = String(value || "").match(/GO-\s*(\d+)/i) || String(value || "").match(/^(\d+)$/);
+  const sequence = match ? Number(match[1]) : NaN;
+  return Number.isFinite(sequence) ? sequence : NaN;
+}
+
+function duplicateOrderNoError(error) {
+  return /duplicate key value|unique|order_no|23505/i.test(String(error?.message || error || ""));
+}
+
+async function nextOrderNoAfter(value) {
+  const sequence = orderSequence(value);
+  if (Number.isFinite(sequence)) return displayOrderNo(sequence + 1);
+  const result = await db.query("select order_no from glass_orders");
+  const maxSequence = result.rows.reduce((max, row) => {
+    const next = orderSequence(row.order_no);
+    return Number.isFinite(next) ? Math.max(max, next) : max;
+  }, 0);
+  return displayOrderNo(maxSequence + 1);
 }
 
 function pushBotLog(line) {
@@ -52,6 +202,28 @@ function telegramBotStatus() {
     pid: telegramBotProcess?.pid || null,
     logs: telegramBotLogs
   };
+}
+
+function terminateChildTree(child, label = "helper") {
+  if (!child) return;
+  const pid = child.pid;
+  try {
+    if (!child.killed) child.kill();
+  } catch (error) {
+    pushBotLog(`Failed to stop ${label}: ${error.message}`);
+  }
+  if (process.platform === "win32" && pid) {
+    try {
+      const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+      killer.once("exit", () => pushBotLog(`${label} process tree ${pid} stopped.`));
+      killer.once("error", (error) => pushBotLog(`Failed to taskkill ${label}: ${error.message}`));
+    } catch (error) {
+      pushBotLog(`Failed to force-stop ${label}: ${error.message}`);
+    }
+  }
 }
 
 function startTelegramBot(options = {}) {
@@ -105,7 +277,7 @@ function startTelegramBot(options = {}) {
 function stopTelegramBot() {
   if (telegramBotProcess && !telegramBotProcess.killed) {
     pushBotLog("Stopping Telegram bot...");
-    telegramBotProcess.kill();
+    terminateChildTree(telegramBotProcess, "Telegram bot");
   }
   return telegramBotStatus();
 }
@@ -160,6 +332,9 @@ function normExcelStatus(typeText = "", value = "") {
 }
 
 function rowArea(row) {
+  if ((row.glassMode || "single") === "single" && Array.isArray(row.drawing?.panels) && row.drawing.panels.length) {
+    return row.drawing.panels.reduce((sum, panel) => sum + (Math.max(0, num(panel.width)) * Math.max(0, num(panel.height))) / 1000000, 0);
+  }
   const widest = Math.max(0, ...(row.layers || []).map((layer) => num(layer.width)));
   const tallest = Math.max(0, ...(row.layers || []).map((layer) => num(layer.height)));
   return (widest * tallest * num(row.quantity, 1)) / 10000;
@@ -175,6 +350,16 @@ function layerPerimeter(layer, quantity = 1) {
 
 function rowTotals(row) {
   const area = rowArea(row);
+  if ((row.glassMode || "single") === "single" && Array.isArray(row.drawing?.panels) && row.drawing.panels.length) {
+    const layer = row.layers?.[0] || {};
+    const layerSale = area * num(layer.unitPrice, num(row.unitPrice));
+    const layerCost = area * num(layer.supplierUnitPrice, num(row.supplierUnitPrice));
+    return {
+      area,
+      total: layerSale,
+      supplierCost: layerCost
+    };
+  }
   const quantity = num(row.quantity, 1);
   const layerSale = (row.layers || []).reduce((sum, layer) => sum + layerArea(layer, quantity) * num(layer.unitPrice, num(row.unitPrice)), 0);
   const layerCost = (row.layers || []).reduce((sum, layer) => sum + layerArea(layer, quantity) * num(layer.supplierUnitPrice, num(row.supplierUnitPrice)), 0);
@@ -186,34 +371,93 @@ function rowTotals(row) {
   };
 }
 
+function rowPhysicalQuantity(row) {
+  if ((row.glassMode || "single") === "single" && Array.isArray(row.drawing?.panels) && row.drawing.panels.length) {
+    return row.drawing.panels.length;
+  }
+  return num(row.quantity, 1);
+}
+
 function publicUser(row) {
   if (!row) return null;
-  const { password, ...user } = row;
+  const { password, password_hash: _passwordHash, ...user } = row;
   return user;
+}
+
+async function migrateLegacyLocalPasswords() {
+  const columns = await db.query(
+    "select column_name from information_schema.columns where table_name = 'users' and column_name in ('password', 'password_hash')"
+  );
+  const names = new Set(columns.rows.map((row) => row.column_name));
+  if (!names.has("password")) return;
+  const legacyUsers = await db.query(
+    "select id, username, email, auth_user_id, display_name, role, password, password_hash from users"
+  );
+  for (const user of legacyUsers.rows) {
+    const legacyPassword = String(user.password || "");
+    const isKnownInsecureSeed = normalizedUsername(user.username) === "admin"
+      && user.display_name === "Admin User"
+      && user.role === "admin"
+      && !clean(user.email)
+      && !clean(user.auth_user_id);
+    if (isKnownInsecureSeed) {
+      await db.query("delete from users where id = $1", [user.id]);
+      continue;
+    }
+    if (!user.password_hash && legacyPassword) {
+      const passwordHash = await hashLocalPassword(legacyPassword);
+      await db.query("update users set password_hash = $1, password = '' where id = $2", [passwordHash, user.id]);
+    }
+  }
+  await db.exec("alter table users drop column if exists password;");
+}
+
+async function bootstrapLocalAdminFromEnvironment() {
+  const result = await db.query("select count(*)::integer as count from users");
+  if (Number(result.rows[0]?.count || 0) > 0) return;
+  const username = clean(process.env.GLASS_ORDERS_ADMIN_USERNAME);
+  const password = String(process.env.GLASS_ORDERS_ADMIN_PASSWORD || "");
+  if (!username && !password) return;
+  if (!username || !password) {
+    throw new Error("Set both GLASS_ORDERS_ADMIN_USERNAME and GLASS_ORDERS_ADMIN_PASSWORD for first-run local setup.");
+  }
+  const passwordHash = await hashLocalPassword(password);
+  await db.query(
+    "insert into users (id, username, email, display_name, role, password_hash, is_active) values ($1,$2,$3,$4,'admin',$5,true)",
+    [
+      gid("usr"),
+      username,
+      clean(process.env.GLASS_ORDERS_ADMIN_EMAIL).toLocaleLowerCase() || null,
+      clean(process.env.GLASS_ORDERS_ADMIN_DISPLAY_NAME) || username,
+      passwordHash
+    ]
+  );
 }
 
 async function migrate() {
   await db.exec(`
-    create table if not exists users (id text primary key, username text not null unique, email text unique, auth_user_id text unique, display_name text not null, role text not null default 'user', password text not null default '', is_active boolean not null default true, last_login_at text, created_at text not null default current_timestamp);
+    create table if not exists users (id text primary key, username text not null unique, email text unique, auth_user_id text unique, display_name text not null, role text not null default 'user', can_view_costs boolean not null default false, password_hash text not null default '', is_active boolean not null default true, last_login_at text, created_at text not null default current_timestamp);
     create table if not exists customers (id text primary key, name text not null unique, phone text, email text, address text, tax_no text, notes text, created_at text not null default current_timestamp);
     create table if not exists suppliers (id text primary key, name text not null unique, phone text, email text, address text, notes text, opening_balance real not null default 0, created_at text not null default current_timestamp);
     create table if not exists supplier_payments (id text primary key, supplier_id text, supplier_name text, paid_at text not null, amount real not null default 0, method text, notes text, created_at text not null default current_timestamp);
     create table if not exists glass_orders (id text primary key, order_no text not null unique, document_id text, order_date text not null, entry_at text, status text not null default 'draft', entry_mode text not null default 'normal', collected_pieces real not null default 0, customer_name text, supplier_name text, project text, code text, notes text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
-    create table if not exists glass_order_rows (id text primary key, order_id text not null, line_no integer not null default 1, glass_mode text not null default 'single', quantity real not null default 1, unit_price real not null default 0, supplier_unit_price real not null default 0, material_unit_price real not null default 0, supplier_material_unit_price real not null default 0, double_gap text, triplex_pvb text, extra_direction text, notes text, layers text not null, drawing text not null, area_m2 real not null default 0, cost real not null default 0, supplier_cost real not null default 0, created_at text not null default current_timestamp);
+    create table if not exists glass_order_rows (id text primary key, order_id text not null, line_no integer not null default 1, glass_mode text not null default 'single', code text, quantity real not null default 1, unit_price real not null default 0, supplier_unit_price real not null default 0, material_unit_price real not null default 0, supplier_material_unit_price real not null default 0, double_gap text, triplex_pvb text, extra_direction text, notes text, received_quantity real, receipt_history text not null default '[]', layers text not null, drawing text not null, area_m2 real not null default 0, cost real not null default 0, supplier_cost real not null default 0, created_at text not null default current_timestamp);
     create table if not exists learned_options (id text primary key, kind text not null, value text not null, unique(kind, value));
     alter table glass_order_rows add column if not exists material_unit_price real not null default 0;
     alter table glass_order_rows add column if not exists supplier_material_unit_price real not null default 0;
     alter table glass_order_rows add column if not exists notes text;
+    alter table glass_order_rows add column if not exists code text;
+    alter table glass_order_rows add column if not exists received_quantity real;
+    alter table glass_order_rows add column if not exists receipt_history text not null default '[]';
     alter table glass_orders add column if not exists entry_at text;
     alter table glass_orders add column if not exists collected_pieces real not null default 0;
     alter table users add column if not exists email text;
     alter table users add column if not exists auth_user_id text;
-    alter table users alter column password set default '';
+    alter table users add column if not exists can_view_costs boolean not null default false;
+    alter table users add column if not exists password_hash text not null default '';
   `);
-  await db.query(
-    "insert into users (id, username, display_name, role, password) values ($1, 'admin', 'Yasser Diab', 'admin', '23320001') on conflict (username) do nothing",
-    [gid("usr")]
-  );
+  await migrateLegacyLocalPasswords();
+  await bootstrapLocalAdminFromEnvironment();
 }
 
 async function ensureParty(table, name) {
@@ -225,12 +469,22 @@ async function ensureParty(table, name) {
   return row;
 }
 
-async function bootstrap() {
+function sanitizeLocalLayers(layers, canViewCosts) {
+  const normalized = parseJson(layers, []);
+  if (canViewCosts) return normalized;
+  return normalized.map((layer) => ({
+    ...layer,
+    supplierUnitPrice: 0,
+    supplier_unit_price: 0
+  }));
+}
+
+async function bootstrap({ canViewCosts = true } = {}) {
   const [customers, suppliers, payments, users, orders, rows, options] = await Promise.all([
     db.query("select * from customers order by name"),
     db.query("select * from suppliers order by name"),
     db.query("select * from supplier_payments order by paid_at desc"),
-    db.query("select id, username, email, auth_user_id, display_name, role, is_active, last_login_at, created_at from users order by created_at, username"),
+    db.query("select id, username, email, auth_user_id, display_name, role, can_view_costs, is_active, last_login_at, created_at from users order by created_at, username"),
     db.query("select * from glass_orders order by order_date desc, order_no desc"),
     db.query("select * from glass_order_rows order by line_no"),
     db.query("select * from learned_options where kind = 'double_gap'")
@@ -239,18 +493,21 @@ async function bootstrap() {
   for (const row of rows.rows) {
     const item = {
       id: row.id,
+      code: row.code || "",
       glassMode: row.glass_mode,
       quantity: row.quantity,
       unitPrice: row.unit_price,
-      supplierUnitPrice: row.supplier_unit_price,
+      supplierUnitPrice: canViewCosts ? row.supplier_unit_price : 0,
       materialUnitPrice: row.material_unit_price,
-      supplierMaterialUnitPrice: row.supplier_material_unit_price,
+      supplierMaterialUnitPrice: canViewCosts ? row.supplier_material_unit_price : 0,
       doubleGap: row.double_gap || "فراغ 6مم",
       triplexPvb: row.triplex_pvb || "0.76 PVB",
       extraDirection: row.extra_direction || "في المنتصف تماماً",
       notes: row.notes || "",
-      layers: JSON.parse(row.layers || "[]"),
-      drawing: JSON.parse(row.drawing || "{\"shapes\":[],\"paths\":[]}")
+      receivedQuantity: row.received_quantity,
+      receiptHistory: parseJson(row.receipt_history, []),
+      layers: sanitizeLocalLayers(row.layers, canViewCosts),
+      drawing: parseJson(row.drawing, { shapes: [], paths: [] })
     };
     if (!byOrder.has(row.order_id)) byOrder.set(row.order_id, []);
     byOrder.get(row.order_id).push(item);
@@ -280,51 +537,231 @@ async function bootstrap() {
   };
 }
 
-async function saveOrder(order, shouldBootstrap = true) {
-  const orderId = order.id || gid("ord");
+async function saveOrder(order, shouldBootstrap = true, options = {}) {
   const customerName = clean(order.customerName);
   const supplierName = clean(order.supplierName);
   const entryAt = order.entryAt === "" ? null : (order.entryAt || new Date().toISOString());
   const status = normalizeOrderStatus(order.status);
-  await ensureParty("customers", customerName);
-  await ensureParty("suppliers", supplierName);
-  await db.query(
-    `insert into glass_orders (id, order_no, document_id, order_date, entry_at, status, entry_mode, collected_pieces, customer_name, supplier_name, project, code, notes, updated_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,current_timestamp)
-     on conflict (order_no) do update set document_id=excluded.document_id, order_date=excluded.order_date, entry_at=coalesce(glass_orders.entry_at, excluded.entry_at), status=excluded.status, entry_mode=excluded.entry_mode, collected_pieces=excluded.collected_pieces, customer_name=excluded.customer_name, supplier_name=excluded.supplier_name, project=excluded.project, code=excluded.code, notes=excluded.notes, updated_at=current_timestamp`,
-    [orderId, order.orderNo, order.documentId || null, order.date, entryAt, status, order.entryMode || "normal", num(order.collectedPieces), customerName, supplierName, order.project || "", order.code || "", order.notes || ""]
-  );
-  const saved = await db.query("select id from glass_orders where order_no = $1", [order.orderNo]);
-  const savedId = saved.rows[0]?.id || orderId;
-  await db.query("delete from glass_order_rows where order_id = $1", [savedId]);
-  for (const [index, row] of (order.rows || []).entries()) {
-    const totals = rowTotals(row);
-    const unitPrice = num(row.unitPrice);
-    const supplierUnitPrice = num(row.supplierUnitPrice);
-    const materialUnitPrice = num(row.materialUnitPrice);
-    const supplierMaterialUnitPrice = num(row.supplierMaterialUnitPrice);
-    await db.query(
-      `insert into glass_order_rows (id, order_id, line_no, glass_mode, quantity, unit_price, supplier_unit_price, material_unit_price, supplier_material_unit_price, double_gap, triplex_pvb, extra_direction, notes, layers, drawing, area_m2, cost, supplier_cost)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-      [row.id || gid("row"), savedId, index + 1, row.glassMode || "single", num(row.quantity, 1), unitPrice, supplierUnitPrice, materialUnitPrice, supplierMaterialUnitPrice, row.doubleGap || null, row.triplexPvb || null, row.extraDirection || null, row.notes || "", JSON.stringify(row.layers || []), JSON.stringify(row.drawing || { shapes: [], paths: [], edges: { top: 0, right: 0, bottom: 0, left: 0 } }), totals.area, totals.total, totals.supplierCost]
-    );
+  const saveAsExisting = order._existingOrder === true;
+  const managesTransaction = options.externalTransaction !== true;
+  const lockedVisibleOrderNo = !!order.orderNo;
+  let candidateOrderNo = order.orderNo ? displayOrderNo(order.orderNo) : await nextOrderNoAfter("");
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    let savedId = clean(order.id);
+    try {
+      if (managesTransaction) await db.exec("begin");
+      await ensureParty("customers", customerName);
+      await ensureParty("suppliers", supplierName);
+      if (savedId) {
+        const byId = await db.query("select id from glass_orders where id = $1 limit 1", [savedId]);
+        savedId = byId.rows[0]?.id || "";
+      }
+      if (!savedId && saveAsExisting && candidateOrderNo) {
+        const byOrderNo = await db.query("select id from glass_orders where order_no = $1 limit 1", [candidateOrderNo]);
+        savedId = byOrderNo.rows[0]?.id || "";
+      }
+      if (saveAsExisting && !savedId) {
+        if (managesTransaction) await db.exec("rollback");
+        throw new Error("تعذر تحديث الطلب لأن السجل الأصلي غير موجود في قاعدة البيانات. لم يتم إنشاء طلب جديد.");
+      }
+      const duplicate = await db.query("select id from glass_orders where order_no = $1 limit 1", [candidateOrderNo]);
+      const duplicateId = duplicate.rows[0]?.id || "";
+      if (duplicateId && duplicateId !== savedId) {
+        if (!savedId && !saveAsExisting) {
+          const rowCheck = await db.query("select id from glass_order_rows where order_id = $1 limit 1", [duplicateId]);
+          if (!rowCheck.rows[0]?.id) {
+            savedId = duplicateId;
+          } else {
+            if (managesTransaction) await db.exec("rollback");
+            throw new Error("رقم الطلب مستخدم بالفعل في طلب آخر. يرجى اختيار رقم مختلف.");
+          }
+        } else {
+          if (managesTransaction) await db.exec("rollback");
+          throw new Error("رقم الطلب مستخدم بالفعل في طلب آخر. يرجى اختيار رقم مختلف.");
+        }
+      }
+      let rowsForSave = order.rows || [];
+      let protectedSupplierCosts = new Map();
+      if (options.preserveSupplierCosts === true) {
+        if (!savedId) {
+          if (managesTransaction) await db.exec("rollback");
+          throw new Error("إنشاء طلب جديد يتطلب مستخدماً لديه صلاحية عرض وتسجيل تكلفة المورد.");
+        }
+        const storedRows = await db.query(
+          "select id, supplier_unit_price, supplier_material_unit_price, supplier_cost, layers from glass_order_rows where order_id = $1 for update",
+          [savedId]
+        );
+        const protectedRows = mergeProtectedLocalOrderRows(rowsForSave, storedRows.rows);
+        rowsForSave = protectedRows.rows;
+        protectedSupplierCosts = protectedRows.protectedSupplierCosts;
+      }
+      const params = [
+        candidateOrderNo,
+        order.documentId || null,
+        order.date,
+        entryAt,
+        status,
+        order.entryMode || "normal",
+        num(order.collectedPieces),
+        customerName,
+        supplierName,
+        order.project || "",
+        order.code || "",
+        order.notes || ""
+      ];
+      if (savedId) {
+        await db.query(
+          `update glass_orders set order_no=$1, document_id=$2, order_date=$3, entry_at=coalesce(entry_at, $4), status=$5, entry_mode=$6, collected_pieces=$7, customer_name=$8, supplier_name=$9, project=$10, code=$11, notes=$12, updated_at=current_timestamp where id=$13`,
+          [...params, savedId]
+        );
+      } else {
+        const insertId = order.id || gid("ord");
+        await db.query(
+          `insert into glass_orders (id, order_no, document_id, order_date, entry_at, status, entry_mode, collected_pieces, customer_name, supplier_name, project, code, notes, updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,current_timestamp)`,
+          [insertId, ...params]
+        );
+        savedId = insertId;
+      }
+      const savedRowIds = [];
+      for (const [index, row] of rowsForSave.entries()) {
+        const totals = rowTotals(row);
+        const unitPrice = num(row.unitPrice);
+        const supplierUnitPrice = num(row.supplierUnitPrice);
+        const materialUnitPrice = num(row.materialUnitPrice);
+        const supplierMaterialUnitPrice = num(row.supplierMaterialUnitPrice);
+        const rowId = row.id || gid("row");
+        row.id = rowId;
+        savedRowIds.push(rowId);
+        await db.query(
+          `insert into glass_order_rows (id, order_id, line_no, glass_mode, code, quantity, unit_price, supplier_unit_price, material_unit_price, supplier_material_unit_price, double_gap, triplex_pvb, extra_direction, notes, received_quantity, receipt_history, layers, drawing, area_m2, cost, supplier_cost)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+           on conflict (id) do update set
+             order_id=excluded.order_id, line_no=excluded.line_no, glass_mode=excluded.glass_mode, code=excluded.code,
+             quantity=excluded.quantity, unit_price=excluded.unit_price, supplier_unit_price=excluded.supplier_unit_price,
+             material_unit_price=excluded.material_unit_price, supplier_material_unit_price=excluded.supplier_material_unit_price,
+             double_gap=excluded.double_gap, triplex_pvb=excluded.triplex_pvb, extra_direction=excluded.extra_direction,
+             notes=excluded.notes, received_quantity=excluded.received_quantity, receipt_history=excluded.receipt_history,
+             layers=excluded.layers, drawing=excluded.drawing, area_m2=excluded.area_m2, cost=excluded.cost,
+             supplier_cost=excluded.supplier_cost`,
+          [rowId, savedId, index + 1, row.glassMode || "single", row.code || "", rowPhysicalQuantity(row), unitPrice, supplierUnitPrice, materialUnitPrice, supplierMaterialUnitPrice, row.doubleGap || null, row.triplexPvb || null, row.extraDirection || null, row.notes || "", row.receivedQuantity == null || row.receivedQuantity === "" ? null : num(row.receivedQuantity), JSON.stringify(Array.isArray(row.receiptHistory) ? row.receiptHistory : []), JSON.stringify(row.layers || []), JSON.stringify(row.drawing || { shapes: [], paths: [], edges: { top: 0, right: 0, bottom: 0, left: 0 }, panels: [] }), totals.area, totals.total, protectedSupplierCosts.has(rowId) ? protectedSupplierCosts.get(rowId) : totals.supplierCost]
+        );
+      }
+      if (savedRowIds.length) {
+        const placeholders = savedRowIds.map((_, index) => `$${index + 2}`).join(",");
+        await db.query(`delete from glass_order_rows where order_id = $1 and id not in (${placeholders})`, [savedId, ...savedRowIds]);
+      } else {
+        await db.query("delete from glass_order_rows where order_id = $1", [savedId]);
+      }
+      if (managesTransaction) await db.exec("commit");
+      order.orderNo = candidateOrderNo;
+      order.id = savedId;
+      return shouldBootstrap ? bootstrap() : order;
+    } catch (error) {
+      if (managesTransaction) {
+        try { await db.exec("rollback"); } catch { /* Transaction may already be closed. */ }
+      }
+      if (!managesTransaction) throw error;
+      if (!duplicateOrderNoError(error) || clean(order.id)) throw error;
+      if (lockedVisibleOrderNo) throw new Error("تعذر حفظ الطلب لأن رقم الطلب المعروض مستخدم بالفعل. لم يتم إنشاء رقم جديد ولم يتم فقد أي من البيانات المدخلة.");
+      candidateOrderNo = await nextOrderNoAfter(candidateOrderNo);
+    }
   }
-  return shouldBootstrap ? bootstrap() : null;
+  throw new Error("تعذر إنشاء رقم فريد للطلب، ولم يتم فقد أي من البيانات المدخلة. يرجى إعادة المحاولة.");
 }
 
-async function deleteOrder(identifier) {
+async function patchOrderStatus(identifier, patch = {}) {
+  const key = clean(identifier || patch.id || patch.orderNo);
+  if (!key) throw httpError("لا يوجد رقم طلب صالح للتحديث.");
+  try {
+    await db.exec("begin");
+    const existing = await db.query(
+      "select id from glass_orders where id = $1 or order_no = $1 limit 1 for update",
+      [key]
+    );
+    const orderId = existing.rows[0]?.id;
+    if (!orderId) throw httpError("الطلب غير موجود.", 404);
+    const storedRows = await db.query(
+      "select id, quantity, received_quantity from glass_order_rows where order_id = $1 for update",
+      [orderId]
+    );
+    const incomingIds = Array.isArray(patch.rows)
+      ? [...new Set(patch.rows.map((row) => clean(row?.id)).filter(Boolean))]
+      : [];
+    let knownRowOwners = [];
+    if (incomingIds.length) {
+      const placeholders = incomingIds.map((_, index) => `$${index + 1}`).join(",");
+      const ownerRows = await db.query(
+        `select id, order_id from glass_order_rows where id in (${placeholders})`,
+        incomingIds
+      );
+      knownRowOwners = ownerRows.rows;
+    }
+    const validated = validateLocalOrderStatusPatch({
+      orderId,
+      patch,
+      storedRows: storedRows.rows,
+      knownRowOwners
+    });
+    if (validated.rows.length) {
+      const values = [];
+      const params = [];
+      for (const [index, row] of validated.rows.entries()) {
+        const offset = index * 3;
+        values.push(`($${offset + 1}::text,$${offset + 2}::real,$${offset + 3}::text)`);
+        params.push(
+          row.id,
+          row.receivedQuantity,
+          JSON.stringify(row.receiptHistory)
+        );
+      }
+      params.push(orderId);
+      await db.query(
+        `update glass_order_rows as target
+         set received_quantity=source.received_quantity, receipt_history=source.receipt_history
+         from (values ${values.join(",")}) as source(id, received_quantity, receipt_history)
+         where target.id=source.id and target.order_id=$${params.length}`,
+        params
+      );
+    }
+    await db.query(
+      "update glass_orders set document_id=$1, status=$2, collected_pieces=$3, updated_at=current_timestamp where id=$4",
+      [patch.documentId || null, validated.status, validated.persistedCollected, orderId]
+    );
+    await db.exec("commit");
+    return {
+      order: {
+        ...patch,
+        id: orderId,
+        status: validated.status,
+        collectedPieces: validated.persistedCollected
+      }
+    };
+  } catch (error) {
+    try { await db.exec("rollback"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+async function deleteOrder(identifier, shouldBootstrap = true) {
   const key = clean(identifier);
   if (!key) throw new Error("لا يوجد رقم طلب صالح للحذف.");
   const existing = await db.query("select id from glass_orders where id = $1 or order_no = $1 limit 1", [key]);
   const orderId = existing.rows[0]?.id;
   if (!orderId) throw new Error("الطلب غير موجود.");
-  await db.query("delete from glass_order_rows where order_id = $1", [orderId]);
-  await db.query("delete from glass_orders where id = $1", [orderId]);
-  return bootstrap();
+  try {
+    await db.exec("begin");
+    await db.query("delete from glass_order_rows where order_id = $1", [orderId]);
+    await db.query("delete from glass_orders where id = $1", [orderId]);
+    await db.exec("commit");
+    return shouldBootstrap ? bootstrap() : { deleted: true, id: orderId };
+  } catch (error) {
+    try { await db.exec("rollback"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
 }
 
 async function importExcel(filePath = workbookPath) {
-  await db.exec("delete from glass_order_rows; delete from glass_orders; delete from customers; delete from suppliers;");
   const workbook = XLSX.readFile(filePath, { cellDates: true });
   const sheet = workbook.Sheets["الادخال"];
   if (!sheet) throw new Error("لم أجد شيت الادخال داخل ملف الإكسل.");
@@ -369,6 +806,7 @@ async function importExcel(filePath = workbookPath) {
     const notes = clean(source["ملاحظات"] || source["ملحوظات"] || source["Notes"]);
     grouped.get(key).rows.push({
       id: gid("row"),
+      code: clean(source["الكود"]),
       glassMode: "single",
       quantity,
       unitPrice: price,
@@ -383,12 +821,23 @@ async function importExcel(filePath = workbookPath) {
       drawing: { shapes: [], paths: [], edges: { top: 0, right: 0, bottom: 0, left: 0 } }
     });
   }
+  if (!grouped.size) {
+    throw new Error("لم يتم العثور على طلبات صالحة للاستيراد. لم تتغير البيانات الحالية.");
+  }
   let importedOrders = 0;
   let importedRows = 0;
-  for (const order of grouped.values()) {
-    await saveOrder(order, false);
-    importedOrders += 1;
-    importedRows += order.rows.length;
+  try {
+    await db.exec("begin");
+    await db.exec("delete from glass_order_rows; delete from glass_orders; delete from customers; delete from suppliers;");
+    for (const order of grouped.values()) {
+      await saveOrder(order, false, { externalTransaction: true });
+      importedOrders += 1;
+      importedRows += order.rows.length;
+    }
+    await db.exec("commit");
+  } catch (error) {
+    try { await db.exec("rollback"); } catch { /* Transaction may already be closed. */ }
+    throw error;
   }
   const snapshot = await bootstrap();
   const exportDir = path.dirname(dataDir);
@@ -414,7 +863,7 @@ async function importExcel(filePath = workbookPath) {
   fs.writeFileSync(
     manifestPath,
     [
-      "Glass Orders local database",
+      "Y.D Glass Manager local database",
       `PGlite database folder: ${dataDir}`,
       `Readable imported-data snapshot: ${snapshotPath}`,
       `Source Excel file: ${filePath}`,
@@ -430,47 +879,127 @@ async function importExcel(filePath = workbookPath) {
 await migrate();
 
 app.get("/api/health", (_req, res) => res.json({ ok: true, port, database: dataDir, workbookPath }));
+app.post("/api/auth/setup", async (req, res) => {
+  if (localAdminSetupInProgress) {
+    res.status(409).json({ error: "إعداد المسؤول الأول قيد التنفيذ." });
+    return;
+  }
+  localAdminSetupInProgress = true;
+  try {
+    const count = await db.query("select count(*)::integer as count from users");
+    if (Number(count.rows[0]?.count || 0) > 0) {
+      res.status(409).json({ error: "تم إعداد مستخدمي الخادم المحلي بالفعل." });
+      return;
+    }
+    const username = clean(req.body?.username);
+    const password = validateLocalPassword(req.body?.password);
+    const displayName = clean(req.body?.display_name) || username;
+    const email = clean(req.body?.email).toLocaleLowerCase() || null;
+    if (!username) {
+      res.status(400).json({ error: "اكتب اسم دخول المسؤول الأول." });
+      return;
+    }
+    const id = gid("usr");
+    const passwordHash = await hashLocalPassword(password);
+    await db.query(
+      "insert into users (id, username, email, display_name, role, password_hash, is_active) values ($1,$2,$3,$4,'admin',$5,true)",
+      [id, username, email, displayName, passwordHash]
+    );
+    const saved = await db.query(
+      "select id, username, email, auth_user_id, display_name, role, can_view_costs, is_active, last_login_at, created_at from users where id = $1",
+      [id]
+    );
+    res.status(201).json({ user: saved.rows[0] });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  } finally {
+    localAdminSetupInProgress = false;
+  }
+});
 app.post("/api/auth/login", async (req, res) => {
   try {
     const username = clean(req.body?.username);
     const password = String(req.body?.password || "");
-    const result = await db.query("select id, username, email, auth_user_id, display_name, role, password, is_active from users where username = $1 limit 1", [username]);
+    const count = await db.query("select count(*)::integer as count from users");
+    if (Number(count.rows[0]?.count || 0) === 0) {
+      res.status(428).json({ error: "يلزم إعداد المسؤول الأول قبل تسجيل الدخول.", code: "LOCAL_SETUP_REQUIRED" });
+      return;
+    }
+    const result = await db.query("select id, username, email, auth_user_id, display_name, role, can_view_costs, password_hash, is_active from users where lower(username) = lower($1) limit 1", [username]);
     const user = result.rows[0];
-    if (!user || user.password !== password || user.is_active === false) return res.status(401).json({ error: "بيانات الدخول غير صحيحة." });
+    const passwordMatches = user ? await verifyLocalPassword(password, user.password_hash) : false;
+    if (!user || !passwordMatches || user.is_active === false) return res.status(401).json({ error: "بيانات الدخول غير صحيحة." });
     await db.query("update users set last_login_at = current_timestamp where id = $1", [user.id]);
-    res.json({ user: { id: user.id, username: user.username, email: user.email || "", auth_user_id: user.auth_user_id || "", display_name: user.display_name, role: user.role } });
+    const token = createLocalSession(user);
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email || "",
+        auth_user_id: user.auth_user_id || "",
+        display_name: user.display_name,
+        role: user.role,
+        can_view_costs: user.role === "admin" || user.can_view_costs === true
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-app.get("/api/bootstrap", async (_req, res) => {
-  try { res.json(await bootstrap()); } catch (error) { res.status(500).json({ error: error.message }); }
+app.post("/api/auth/logout", (req, res) => {
+  if (req.localSession?.token) localSessions.delete(req.localSession.token);
+  res.json({ ok: true });
 });
-app.get("/api/users", async (_req, res) => {
+app.get("/api/auth/session", async (req, res) => {
   try {
-    const result = await db.query("select id, username, email, auth_user_id, display_name, role, is_active, last_login_at, created_at from users order by created_at, username");
+    const result = await db.query(
+      "select id, username, email, auth_user_id, display_name, role, can_view_costs, is_active from users where id = $1 limit 1",
+      [req.localSession.userId]
+    );
+    const user = result.rows[0];
+    if (!user || user.is_active === false) {
+      if (req.localSession?.token) localSessions.delete(req.localSession.token);
+      res.status(401).json({ error: "الجلسة المحلية غير صالحة." });
+      return;
+    }
+    res.json({ user: publicUser(user) });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+app.get("/api/bootstrap", async (req, res) => {
+  try { res.json(await bootstrap({ canViewCosts: req.localSession.canViewCosts })); } catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.get("/api/users", async (req, res) => {
+  try {
+    if (!requireLocalAdmin(req, res)) return;
+    const result = await db.query("select id, username, email, auth_user_id, display_name, role, can_view_costs, is_active, last_login_at, created_at from users order by created_at, username");
     res.json(result.rows);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post("/api/users", async (req, res) => {
   try {
+    if (!requireLocalAdmin(req, res)) return;
     const user = req.body || {};
     const username = clean(user.username);
     const displayName = clean(user.display_name);
     const email = clean(user.email).toLowerCase();
-    const password = String(user.password || "");
-    if (!username || !displayName || !password) return res.status(400).json({ error: "اكتب اسم الدخول والاسم وكلمة المرور." });
+    const password = validateLocalPassword(user.password);
+    if (!username || !displayName) return res.status(400).json({ error: "اكتب اسم الدخول والاسم وكلمة المرور." });
+    const passwordHash = await hashLocalPassword(password);
     const id = gid("usr");
     await db.query(
-      "insert into users (id, username, email, display_name, role, password, is_active) values ($1,$2,$3,$4,$5,$6,$7)",
-      [id, username, email || null, displayName, user.role === "admin" ? "admin" : "user", password, user.is_active === false ? false : true]
+      "insert into users (id, username, email, display_name, role, can_view_costs, password_hash, is_active) values ($1,$2,$3,$4,$5,$6,$7,$8)",
+      [id, username, email || null, displayName, user.role === "admin" ? "admin" : "user", user.can_view_costs === true, passwordHash, user.is_active === false ? false : true]
     );
-    const saved = await db.query("select id, username, email, auth_user_id, display_name, role, is_active, last_login_at, created_at from users where id = $1", [id]);
+    const saved = await db.query("select id, username, email, auth_user_id, display_name, role, can_view_costs, is_active, last_login_at, created_at from users where id = $1", [id]);
     res.json(saved.rows[0]);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.put("/api/users/:id", async (req, res) => {
   try {
+    if (!requireLocalAdmin(req, res)) return;
     const existing = await db.query("select * from users where id = $1 limit 1", [req.params.id]);
     if (!existing.rows[0]) return res.status(404).json({ error: "المستخدم غير موجود." });
     const body = req.body || {};
@@ -480,52 +1009,81 @@ app.put("/api/users/:id", async (req, res) => {
       auth_user_id: clean(body.auth_user_id || existing.rows[0].auth_user_id) || null,
       display_name: clean(body.display_name || existing.rows[0].display_name),
       role: body.role === "admin" ? "admin" : "user",
-      password: body.password ? String(body.password) : existing.rows[0].password,
+      can_view_costs: body.can_view_costs === undefined ? existing.rows[0].can_view_costs === true : body.can_view_costs === true,
+      password_hash: body.password ? await hashLocalPassword(body.password) : existing.rows[0].password_hash,
       is_active: body.is_active === undefined ? existing.rows[0].is_active !== false : !!body.is_active
     };
     await db.query(
-      "update users set username=$1, email=$2, auth_user_id=$3, display_name=$4, role=$5, password=$6, is_active=$7 where id=$8",
-      [next.username, next.email, next.auth_user_id, next.display_name, next.role, next.password, next.is_active, req.params.id]
+      "update users set username=$1, email=$2, auth_user_id=$3, display_name=$4, role=$5, can_view_costs=$6, password_hash=$7, is_active=$8 where id=$9",
+      [next.username, next.email, next.auth_user_id, next.display_name, next.role, next.can_view_costs, next.password_hash, next.is_active, req.params.id]
     );
-    const saved = await db.query("select id, username, email, auth_user_id, display_name, role, is_active, last_login_at, created_at from users where id = $1", [req.params.id]);
+    const saved = await db.query("select id, username, email, auth_user_id, display_name, role, can_view_costs, is_active, last_login_at, created_at from users where id = $1", [req.params.id]);
+    updateLocalSessionsForUser(saved.rows[0]);
     res.json(saved.rows[0]);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.delete("/api/users/:id/hard", async (req, res) => {
   try {
+    if (!requireLocalAdmin(req, res)) return;
+    if (req.localSession?.userId === req.params.id) return res.status(400).json({ error: "لا يمكن حذف المستخدم الحالي." });
     await db.query("delete from users where id = $1", [req.params.id]);
+    updateLocalSessionsForUser({ id: req.params.id, is_active: false });
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.delete("/api/users/:id", async (req, res) => {
   try {
+    if (!requireLocalAdmin(req, res)) return;
+    if (req.localSession?.userId === req.params.id) return res.status(400).json({ error: "لا يمكن إيقاف المستخدم الحالي." });
     await db.query("update users set is_active = false where id = $1", [req.params.id]);
+    updateLocalSessionsForUser({ id: req.params.id, is_active: false });
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.put("/api/users/:id/password", async (req, res) => {
   try {
+    if (req.localSession?.userId !== req.params.id) return res.status(403).json({ error: "يمكنك تغيير كلمة مرور حسابك فقط." });
     const currentPassword = String(req.body?.current_password || "");
-    const newPassword = String(req.body?.new_password || "");
+    const newPassword = validateLocalPassword(req.body?.new_password);
     const result = await db.query("select * from users where id = $1 limit 1", [req.params.id]);
     const user = result.rows[0];
-    if (!user || user.password !== currentPassword) return res.status(401).json({ error: "كلمة المرور الحالية غير صحيحة." });
-    if (!newPassword) return res.status(400).json({ error: "اكتب كلمة المرور الجديدة." });
-    await db.query("update users set password = $1 where id = $2", [newPassword, req.params.id]);
+    if (!user || !(await verifyLocalPassword(currentPassword, user.password_hash))) return res.status(401).json({ error: "كلمة المرور الحالية غير صحيحة." });
+    const passwordHash = await hashLocalPassword(newPassword);
+    await db.query("update users set password_hash = $1 where id = $2", [passwordHash, req.params.id]);
     res.json({ ok: true });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post("/api/orders", async (req, res) => {
-  try { res.json(await saveOrder(req.body)); } catch (error) { res.status(500).json({ error: error.message }); }
+  try {
+    const order = req.body || {};
+    await saveOrder(order, false, { preserveSupplierCosts: !req.localSession.canViewCosts });
+    res.json({ order });
+  } catch (error) {
+    const message = duplicateOrderNoError(error)
+      ? "تعذر إنشاء رقم فريد للطلب، ولم يتم فقد أي من البيانات المدخلة. يرجى إعادة المحاولة."
+      : error.message;
+    const statusCode = /صلاحية.*تكلفة|supplier-cost permission|cost permission/i.test(message) ? 403 : 500;
+    res.status(statusCode).json({ error: message });
+  }
+});
+app.patch("/api/orders/:id/status", async (req, res) => {
+  try {
+    res.json(await patchOrderStatus(req.params.id, req.body || {}));
+  } catch (error) {
+    res.status(error.statusCode || error.httpStatus || 500).json({
+      error: error.message,
+      ...(error.code ? { code: error.code } : {})
+    });
+  }
 });
 app.delete("/api/orders/:id", async (req, res) => {
-  try { res.json(await deleteOrder(req.params.id)); } catch (error) { res.status(500).json({ error: error.message }); }
+  try { res.json(await deleteOrder(req.params.id, false)); } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post("/api/payments", async (req, res) => {
   try {
     const p = req.body || {};
     await db.query("insert into supplier_payments (id, supplier_id, supplier_name, paid_at, amount, method, notes) values ($1,$2,$3,$4,$5,$6,$7)", [gid("pay"), p.supplier_id || null, p.supplier_name || null, p.paid_at || new Date().toISOString().slice(0, 10), num(p.amount), p.method || "", p.notes || ""]);
-    res.json(await bootstrap());
+    res.json(await bootstrap({ canViewCosts: req.localSession.canViewCosts }));
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.put("/api/payments/:id", async (req, res) => {
@@ -535,30 +1093,75 @@ app.put("/api/payments/:id", async (req, res) => {
       "update supplier_payments set supplier_id=$1, supplier_name=$2, paid_at=$3, amount=$4, method=$5, notes=$6 where id=$7",
       [p.supplier_id || null, p.supplier_name || null, p.paid_at || new Date().toISOString().slice(0, 10), num(p.amount), p.method || "", p.notes || "", req.params.id]
     );
-    res.json(await bootstrap());
+    res.json(await bootstrap({ canViewCosts: req.localSession.canViewCosts }));
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.delete("/api/payments/:id", async (req, res) => {
   try {
     await db.query("delete from supplier_payments where id = $1", [req.params.id]);
-    res.json(await bootstrap());
+    res.json(await bootstrap({ canViewCosts: req.localSession.canViewCosts }));
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.get("/api/telegram-bot/status", (_req, res) => {
   res.json(telegramBotStatus());
 });
 app.post("/api/telegram-bot/start", (req, res) => {
-  try { res.json(startTelegramBot(req.body || {})); } catch (error) { res.status(500).json({ error: error.message, logs: telegramBotLogs }); }
+  try {
+    if (!requireLocalAdmin(req, res)) return;
+    res.json(startTelegramBot(req.body || {}));
+  } catch (error) { res.status(500).json({ error: error.message, logs: telegramBotLogs }); }
 });
-app.post("/api/telegram-bot/stop", (_req, res) => {
-  try { res.json(stopTelegramBot()); } catch (error) { res.status(500).json({ error: error.message, logs: telegramBotLogs }); }
+app.post("/api/telegram-bot/stop", (req, res) => {
+  try {
+    if (!requireLocalAdmin(req, res)) return;
+    res.json(stopTelegramBot());
+  } catch (error) { res.status(500).json({ error: error.message, logs: telegramBotLogs }); }
 });
 app.post("/api/import/excel", async (req, res) => {
-  try { res.json(await importExcel(req.body?.filePath || workbookPath)); } catch (error) { res.status(500).json({ error: error.message }); }
+  try {
+    if (!requireLocalAdmin(req, res)) return;
+    res.json(await importExcel(req.body?.filePath || workbookPath));
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+async function shutdownLocalServer(signal = "shutdown") {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[Shutdown] Local server received ${signal}`);
+  try {
+    stopTelegramBot();
+    console.log("[Shutdown] Telegram helper stopped");
+  } catch (error) {
+    console.warn(`[Shutdown] Telegram helper stop failed: ${error.message}`);
+  }
+  if (httpServer) {
+    await new Promise((resolve) => {
+      httpServer.close((error) => {
+        if (error) console.warn(`[Shutdown] HTTP server close failed: ${error.message}`);
+        else console.log("[Shutdown] HTTP server closed");
+        resolve();
+      });
+      setTimeout(resolve, 2500).unref?.();
+    });
+  }
+  try {
+    await db.close?.();
+    console.log("[Shutdown] Database closed");
+  } catch (error) {
+    console.warn(`[Shutdown] Database close failed: ${error.message}`);
+  }
+}
+
+process.once("SIGTERM", () => {
+  shutdownLocalServer("SIGTERM").finally(() => process.exit(0));
+});
+
+process.once("SIGINT", () => {
+  shutdownLocalServer("SIGINT").finally(() => process.exit(0));
 });
 
 process.on("exit", () => {
   if (telegramBotProcess && !telegramBotProcess.killed) telegramBotProcess.kill();
 });
 
-app.listen(port, "127.0.0.1", () => console.log(`Glass Orders local server: http://127.0.0.1:${port}`));
+httpServer = app.listen(port, "127.0.0.1", () => console.log(`Y.D Glass Manager local server: http://127.0.0.1:${port}`));
