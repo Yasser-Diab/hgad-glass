@@ -1,6 +1,7 @@
 -- Release security migration for existing Y.D Glass Manager deployments.
--- Supabase Auth becomes the only password authority; public.users remains a
--- profile/authorization table and contains no password material.
+-- Supabase Auth becomes the active password authority. Existing legacy
+-- password material is retained for recovery and rollback until a separately
+-- reviewed, backup-backed cleanup migration is explicitly approved.
 
 alter table public.users add column if not exists email text;
 alter table public.users add column if not exists auth_user_id uuid;
@@ -20,10 +21,14 @@ begin
     from pg_constraint
     where conname = 'users_auth_user_id_fkey'
       and conrelid = 'public.users'::regclass
+      and confrelid = 'auth.users'::regclass
+      and confdeltype = 'n'
   ) then
     alter table public.users
+      drop constraint if exists users_auth_user_id_fkey;
+    alter table public.users
       add constraint users_auth_user_id_fkey
-      foreign key (auth_user_id) references auth.users(id) on delete cascade;
+      foreign key (auth_user_id) references auth.users(id) on delete set null;
   end if;
 end
 $$;
@@ -38,7 +43,9 @@ security definer
 set search_path = ''
 as $$
 declare
-  linked_profile_id uuid;
+  -- Existing installations may use opaque text profile IDs while fresh
+  -- installations use UUIDs. Keep the application profile ID type-neutral.
+  linked_profile_id text;
   requested_username text;
   requested_display_name text;
 begin
@@ -49,7 +56,7 @@ begin
     where auth_user_id is null
       and email is not null
       and lower(email) = lower(new.email)
-    returning id into linked_profile_id;
+    returning id::text into linked_profile_id;
   end if;
 
   if linked_profile_id is null then
@@ -97,30 +104,15 @@ where profile.auth_user_id is null
   and auth_user.email is not null
   and lower(profile.email) = lower(auth_user.email);
 
--- Fail closed for an existing installation instead of dropping legacy
--- credentials and locking every administrator out. A genuinely empty project
--- has no legacy credentials to protect and may continue through provisioning.
-do $$
-begin
-  if exists (
-    select 1
-    from public.users
-  ) and not exists (
-    select 1
-    from public.users
-    where role = 'admin'
-      and is_active = true
-      and auth_user_id is not null
-  ) then
-    raise exception 'Supabase Auth admin profile required before password migration'
-      using hint = 'Create an Auth user whose email matches an active public.users admin profile, then rerun the migration.';
-  end if;
-end
-$$;
+-- Do not halt the chronological migration chain for active profiles that still
+-- need provisioning. The following additive auth migration installs the
+-- private resolver, admin audit, and preflight needed to finish that work.
+-- Access remains protected by auth_user_id-based RLS, and legacy credentials
+-- remain untouched for backup-backed recovery.
 
--- Drop plaintext application passwords only after existing Auth/profile
--- mapping is complete. Business tables and their data are not modified.
-alter table public.users drop column if exists password;
+-- Recovery policy: deliberately preserve any existing public.users.password
+-- column and values. Removing legacy credentials is irreversible and must be a
+-- separate, explicitly approved migration after backup and live login checks.
 
 -- Auth identities with no pre-provisioned profile are inactive until approved
 -- by an existing application administrator.

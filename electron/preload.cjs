@@ -1,8 +1,40 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+const authRecoveryListeners = new Set();
+let authRecoverySignalPending = false;
+let authRecoveryDispatching = false;
+
+async function dispatchPendingAuthRecovery() {
+  if (authRecoveryDispatching || !authRecoveryListeners.size) return;
+  authRecoveryDispatching = true;
+  try {
+    const callbackUrl = await ipcRenderer.invoke("glass-orders:consume-auth-recovery-url");
+    authRecoverySignalPending = false;
+    if (!callbackUrl) return;
+    for (const callback of [...authRecoveryListeners]) {
+      Promise.resolve(callback(callbackUrl)).catch(() => null);
+    }
+  } finally {
+    authRecoveryDispatching = false;
+  }
+}
+
+ipcRenderer.on("glass-orders:auth-recovery-available", () => {
+  authRecoverySignalPending = true;
+  void dispatchPendingAuthRecovery();
+});
+
 contextBridge.exposeInMainWorld("glassOrdersDesktop", {
   platform: process.platform,
+  authRecoveryRedirectUrl: "ydglassmanager://auth/recovery",
   getAppVersion: () => ipcRenderer.invoke("glass-orders:app-version"),
+  consumeAuthRecoveryUrl: () => ipcRenderer.invoke("glass-orders:consume-auth-recovery-url"),
+  onAuthRecoveryUrl: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    authRecoveryListeners.add(callback);
+    if (authRecoverySignalPending) void dispatchPendingAuthRecovery();
+    return () => authRecoveryListeners.delete(callback);
+  },
   startLocalServer: () => ipcRenderer.invoke("glass-orders:start-local-server"),
   stopLocalServer: () => ipcRenderer.invoke("glass-orders:stop-local-server"),
   localServerLogs: () => ipcRenderer.invoke("glass-orders:local-server-logs"),

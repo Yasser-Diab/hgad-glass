@@ -12,7 +12,7 @@ create table if not exists public.users (
   id uuid primary key default gen_random_uuid(),
   username text not null unique,
   email text unique,
-  auth_user_id uuid unique references auth.users(id) on delete cascade,
+  auth_user_id uuid unique references auth.users(id) on delete set null,
   display_name text not null,
   role text not null default 'user',
   can_view_costs boolean not null default false,

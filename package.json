@@ -57,6 +57,14 @@
   "build": {
     "appId": "com.hgad.glassorders",
     "productName": "Y.D Glass Manager",
+    "protocols": [
+      {
+        "name": "Y.D Glass Manager password recovery",
+        "schemes": [
+          "ydglassmanager"
+        ]
+      }
+    ],
     "electronDist": "node_modules/electron/dist",
     "asar": true,
     "asarUnpack": [

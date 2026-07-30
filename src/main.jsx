@@ -85,6 +85,10 @@ import {
   correctReceiptHistoryOperation,
   validateReceiptBatch
 } from "./orderReceipts.js";
+import {
+  DESKTOP_AUTH_RECOVERY_REDIRECT_URL,
+  establishSupabaseRecoverySession
+} from "./authRecovery.js";
 import "./styles.css";
 
 const VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "0.0.0";
@@ -3139,10 +3143,80 @@ function supabaseEnabled() {
 }
 
 function supabaseRedirectOptions() {
-  const configured = supabaseConfig().redirectUrl;
+  if (window.glassOrdersDesktop?.authRecoveryRedirectUrl === DESKTOP_AUTH_RECOVERY_REDIRECT_URL) {
+    return { redirectTo: DESKTOP_AUTH_RECOVERY_REDIRECT_URL };
+  }
+  const configured = (() => {
+    try {
+      const parsed = new URL(supabaseConfig().redirectUrl || "");
+      return ["https:", "http:"].includes(parsed.protocol) ? parsed.toString() : "";
+    } catch {
+      return "";
+    }
+  })();
   const fallback = window.location.origin?.startsWith("http") ? window.location.origin : "";
   const redirectTo = configured || fallback;
   return redirectTo ? { redirectTo } : undefined;
+}
+
+async function clearSupabaseRecoverySession(setRecoveryOpen, setCurrentUser) {
+  const client = getSupabaseClient();
+  let signOutPromise = Promise.resolve();
+  try {
+    signOutPromise = Promise.resolve(client?.auth?.signOut?.({ scope: "local" })).catch(() => null);
+  } catch {
+    // Continue with mandatory local cleanup.
+  }
+  try {
+    clearSupabaseAuthStorage();
+    localStorage.removeItem("glassOrdersUser");
+  } catch {
+    // Continue clearing in-memory state when storage is unavailable.
+  }
+  resetSupabaseClientCache();
+  setCurrentUser(null);
+  setRecoveryOpen(false);
+  await signOutPromise;
+}
+
+function useDesktopPasswordRecovery(setRecoveryOpen, setMessage, setCurrentUser) {
+  useEffect(() => {
+    const desktop = window.glassOrdersDesktop;
+    if (!desktop?.consumeAuthRecoveryUrl || !desktop?.onAuthRecoveryUrl) return undefined;
+    let active = true;
+    let processing = Promise.resolve();
+
+    function processCallback(callbackUrl) {
+      if (!callbackUrl) return;
+      processing = processing.then(async () => {
+        if (!active) return;
+        try {
+          const client = getSupabaseClient();
+          if (!client || !hasSupabaseConfig()) throw new Error("اتصال Supabase غير متاح.");
+          await establishSupabaseRecoverySession(client, callbackUrl);
+          if (!active) return;
+          localStorage.removeItem("glassOrdersUser");
+          setDataSourceMode("supabase");
+          setCurrentUser(null);
+          setRecoveryOpen(true);
+          setMessage("تم التحقق من رابط الاستعادة. أدخل كلمة مرور جديدة.");
+        } catch (error) {
+          if (active) setMessage(`تعذر فتح رابط الاستعادة: ${safeErrorMessage(error)}`);
+        }
+      });
+    }
+
+    const unsubscribe = desktop.onAuthRecoveryUrl(processCallback);
+    Promise.resolve(desktop.consumeAuthRecoveryUrl())
+      .then(processCallback)
+      .catch(() => {
+        if (active) setMessage("تعذر قراءة رابط استعادة كلمة المرور.");
+      });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [setRecoveryOpen, setMessage, setCurrentUser]);
 }
 
 function normalizeVersionText(value = "") {
@@ -3647,21 +3721,103 @@ async function supabaseProfileForAuthUser(client, authUserId) {
   return result.data || null;
 }
 
+async function glassAuthFunctionError(error) {
+  const context = error?.context;
+  if (context?.clone) {
+    try {
+      const payload = await context.clone().json();
+      if (payload?.error) return safeErrorMessage(payload.error);
+    } catch {
+      // Fall through to the SDK error message when the response has no JSON body.
+    }
+  }
+  return safeErrorMessage(error);
+}
+
+async function invokeGlassAuth(action, payload = {}) {
+  const client = getSupabaseClient();
+  if (!client || !hasSupabaseConfig()) throw new Error("اتصال Supabase غير متاح.");
+  const result = await client.functions.invoke("glass-auth", {
+    body: { action, ...payload }
+  });
+  if (result.error) throw new Error(await glassAuthFunctionError(result.error));
+  if (result.data?.error) throw new Error(safeErrorMessage(result.data.error));
+  return result.data || {};
+}
+
+async function restoreSupabaseSessionUser() {
+  if (!hasSupabaseConfig() || localServerEnabled()) return null;
+  const client = getSupabaseClient();
+  if (!client) return null;
+  try {
+    const sessionResult = await client.auth.getSession();
+    const authUserId = sessionResult.data?.session?.user?.id;
+    if (sessionResult.error || !authUserId) return null;
+    const profile = await supabaseProfileForAuthUser(client, authUserId);
+    if (!profile || profile.is_active === false) {
+      await client.auth.signOut({ scope: "local" }).catch(() => null);
+      return null;
+    }
+    const user = appPublicUser(profile);
+    sanitizeLocalCostCachesForUser(user);
+    localStorage.setItem("glassOrdersUser", JSON.stringify(user));
+    setDataSourceMode("supabase");
+    return user;
+  } catch {
+    // Fail closed without deleting a potentially valid session during a
+    // temporary network outage. The user can retry or use email break-glass.
+    return null;
+  }
+}
+
 async function loginUser(username, password, email = "") {
   const cleanUsername = cleanName(username);
   const useSupabaseAuth = hasSupabaseConfig() && !localServerEnabled();
   if (useSupabaseAuth) {
-    const cleanEmail = cleanName(email || (cleanUsername.includes("@") ? cleanUsername : "")).toLocaleLowerCase();
-    if (!cleanEmail || !password) throw new Error("اكتب البريد الإلكتروني وكلمة المرور.");
+    const identity = cleanUsername || cleanName(email).toLocaleLowerCase();
+    if (!identity || !password) throw new Error("اكتب اسم المستخدم وكلمة المرور.");
     const client = getSupabaseClient();
     if (!client) throw new Error("اتصال Supabase غير متاح.");
     try {
-      const authResult = await client.auth.signInWithPassword({ email: cleanEmail, password });
-      if (authResult.error || !authResult.data?.user?.id) throw authResult.error || new Error("بيانات الدخول غير صحيحة.");
-      const profile = await supabaseProfileForAuthUser(client, authResult.data.user.id);
+      let profile;
+      let directEmailLogin = false;
+      if (identity.includes("@")) {
+        // Break-glass path: a linked administrator can still enter by email if
+        // the username resolver function is temporarily unavailable.
+        directEmailLogin = true;
+        const directResult = await client.auth.signInWithPassword({
+          email: identity.toLocaleLowerCase(),
+          password
+        });
+        if (directResult.error || !directResult.data?.user?.id) {
+          throw directResult.error || new Error("بيانات الدخول غير صحيحة.");
+        }
+        profile = await supabaseProfileForAuthUser(client, directResult.data.user.id);
+      } else {
+        const response = await invokeGlassAuth("login", {
+          identity,
+          password
+        });
+        const session = response.session || {};
+        if (!session.access_token || !session.refresh_token) throw new Error("بيانات الدخول غير صحيحة.");
+        const sessionResult = await client.auth.setSession({
+          access_token: session.access_token,
+          refresh_token: session.refresh_token
+        });
+        if (sessionResult.error || !sessionResult.data?.user?.id) {
+          throw sessionResult.error || new Error("تعذر إنشاء جلسة الدخول.");
+        }
+        profile = response.profile;
+      }
       if (!profile || profile.is_active === false) {
         await client.auth.signOut({ scope: "local" }).catch(() => null);
         throw new Error("الحساب غير مفعّل في التطبيق. تواصل مع مدير النظام.");
+      }
+      if (directEmailLogin) {
+        const lastLoginResult = await client.rpc("glass_auth_record_login");
+        if (lastLoginResult.error) {
+          console.warn(maskSensitiveText(`Direct-email last_login_at update skipped: ${safeErrorMessage(lastLoginResult.error)}`));
+        }
       }
       const publicUser = appPublicUser(profile);
       sanitizeLocalCostCachesForUser(publicUser);
@@ -3711,14 +3867,13 @@ async function setupLocalAdmin(username, email, password) {
   });
 }
 
-async function sendSupabasePasswordReset(_username, email) {
-  const client = getSupabaseClient();
-  const cleanEmail = cleanName(email).toLocaleLowerCase();
-  if (!client || !hasSupabaseConfig()) throw new Error("فعّل اتصال Supabase أولاً.");
-  if (!cleanEmail) throw new Error("اكتب البريد الإلكتروني المسجل.");
-  const result = await client.auth.resetPasswordForEmail(cleanEmail, supabaseRedirectOptions());
-  if (result.error) throw result.error;
-  return result.data;
+async function sendSupabasePasswordReset(username, email) {
+  const identity = cleanName(username || email).toLocaleLowerCase();
+  if (!identity) throw new Error("اكتب اسم المستخدم أو البريد الإلكتروني المسجل.");
+  return invokeGlassAuth("reset-password", {
+    identity,
+    redirectTo: supabaseRedirectOptions()?.redirectTo || ""
+  });
 }
 
 async function changeSupabaseAppUserPassword(currentUser, currentPassword, newPassword) {
@@ -4413,6 +4568,7 @@ function App() {
   const [loadingFailure, setLoadingFailure] = useState(null);
   const [message, setMessage] = useState("");
   const [currentUser, setCurrentUser] = useState(currentStoredUser);
+  const [sessionRestoreChecked, setSessionRestoreChecked] = useState(false);
   const [data, setData] = useState({ customers: [], suppliers: [], payments: [], orders: [], learnedOptions: GAP_DEFAULTS, learnedTableOptions: normalizeLearnedTableOptions() });
   const [draft, setDraft] = useState(createDraft());
   const [draftSavedMarker, setDraftSavedMarker] = useState("");
@@ -4429,6 +4585,7 @@ function App() {
   const [passwordRecoveryOpen, setPasswordRecoveryOpen] = useState(false);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState(null);
+  useDesktopPasswordRecovery(setPasswordRecoveryOpen, setMessage, setCurrentUser);
   const saveInFlightRef = useRef(false);
   const savePromiseRef = useRef(null);
   const saveRecoveryCheckedRef = useRef(false);
@@ -4788,9 +4945,22 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    restoreSupabaseSessionUser().then((user) => {
+      if (cancelled) return;
+      if (user) setCurrentUser(user);
+      setSessionRestoreChecked(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionRestoreChecked) return;
     if (currentUser) refresh();
     else setLoading(false);
-  }, [currentUser]);
+  }, [currentUser, sessionRestoreChecked]);
 
   useEffect(() => {
     if (!loading || loadingFailure) {
@@ -4950,11 +5120,12 @@ function App() {
   async function completePasswordRecovery(newPassword) {
     setLoading(true);
     try {
+      if (String(newPassword || "").length < 10) throw new Error("كلمة المرور يجب ألا تقل عن 10 أحرف.");
       const client = getSupabaseClient();
       if (!client) throw new Error("اتصال Supabase غير متاح.");
       const result = await client.auth.updateUser({ password: newPassword });
       if (result.error) throw result.error;
-      setPasswordRecoveryOpen(false);
+      await clearSupabaseRecoverySession(setPasswordRecoveryOpen, setCurrentUser);
       setMessage("تم تحديث كلمة المرور. يمكنك تسجيل الدخول الآن.");
     } catch (error) {
       setMessage(`تعذر تحديث كلمة المرور: ${safeErrorMessage(error)}`);
@@ -4995,7 +5166,7 @@ function App() {
     setMessage("");
     try {
       await sendSupabasePasswordReset(credentials.username, credentials.email);
-      setMessage("تم إرسال رابط إعادة تعيين كلمة المرور إلى البريد المسجل لهذا المستخدم.");
+      setMessage("تم قبول الطلب. إذا كان الحساب مرتبطاً ببريد Supabase صالح فسيصل رابط إعادة التعيين.");
     } catch (error) {
       setMessage(`تعذر إرسال إعادة التعيين: ${safeErrorMessage(error)}`);
     } finally {
@@ -5631,8 +5802,8 @@ function App() {
     }
   }
 
-  function closePasswordRecovery() {
-    setPasswordRecoveryOpen(false);
+  async function closePasswordRecovery() {
+    await clearSupabaseRecoverySession(setPasswordRecoveryOpen, setCurrentUser);
     settleAppFocus();
   }
 
@@ -5696,13 +5867,13 @@ function App() {
           logoSrc={appLogoSrc}
           version={runtimeVersion}
         />
-        {passwordRecoveryOpen && <PasswordRecoveryModal busy={loading} onSave={completePasswordRecovery} onClose={() => setPasswordRecoveryOpen(false)} />}
+        {passwordRecoveryOpen && <PasswordRecoveryModal busy={loading} onSave={completePasswordRecovery} onClose={closePasswordRecovery} />}
       </>
     );
   }
 
   return (
-    <main className={mobileMenuOpen ? "app-shell mobile-nav-open" : "app-shell"} dir="rtl">
+    <main className={mobileMenuOpen ? "app-shell mobile-nav-open" : "app-shell"} data-active-tab={activeTab} dir="rtl">
       {loading && (
         <LoadingLayer
           logoSrc={loadingLogo}
@@ -5747,8 +5918,8 @@ function App() {
             <p dir="ltr">{connectionLabel}</p>
           </div>
           <div className="top-actions">
-            <span className="time-chip" dir="ltr">Cairo {cairoNow}</span>
-            <span className="time-chip" dir="ltr">UTC {utcNow}</span>
+            <span className="time-chip cairo-time" dir="ltr">Cairo {cairoNow}</span>
+            <span className="time-chip utc-time" dir="ltr">UTC {utcNow}</span>
             <span className="user-chip">Eng. {currentUser.display_name}</span>
             <button className="icon-button" title={`تراجع — Ctrl+Z${historyStatus.canUndo ? `: ${historyStatus.undoLabel}` : ""}`} disabled={!historyStatus.canUndo} onClick={undoAppState}><Undo2 size={18} /></button>
             <button className="icon-button" title={`إعادة — Ctrl+Y${historyStatus.canRedo ? `: ${historyStatus.redoLabel}` : ""}`} disabled={!historyStatus.canRedo} onClick={redoAppState}><Redo2 size={18} /></button>
@@ -5876,9 +6047,6 @@ function App() {
           currentUser={currentUser}
           logoSrc={reportLogoSrc}
           onClose={closePreview}
-          onOpenOrder={(order) => {
-            if (openOrder(order)) setPreview(null);
-          }}
         />
       )}
       {supplierPayment && <PaymentModal supplier={supplierPayment} onClose={closeSupplierPayment} onSave={addSupplierPayment} />}
@@ -6159,13 +6327,18 @@ function LoadingLayer({
 }
 
 function LoginView({ onLogin, onSetupLocalAdmin, onResetPassword, supabaseMode, localSetupMode = false, message, onClearMessage, busy, logoSrc, version = VERSION }) {
-  const [username, setUsername] = useState(() => localStorage.getItem("glassOrdersLastUsername") || "");
+  const [username, setUsername] = useState(() => (
+    localStorage.getItem("glassOrdersLastUsername")
+    || localStorage.getItem("glassOrdersLastEmail")
+    || ""
+  ));
   const [email, setEmail] = useState(() => localStorage.getItem("glassOrdersLastEmail") || "");
   const [password, setPassword] = useState("");
   async function submit(event) {
     preventCancelableDefault(event);
     if (username) localStorage.setItem("glassOrdersLastUsername", username);
-    if (email) localStorage.setItem("glassOrdersLastEmail", email);
+    if (username.includes("@")) localStorage.setItem("glassOrdersLastEmail", username);
+    else if (email) localStorage.setItem("glassOrdersLastEmail", email);
     await onLogin({ username, email, password });
   }
   async function setupFirstLocalAdmin() {
@@ -6174,8 +6347,9 @@ function LoginView({ onLogin, onSetupLocalAdmin, onResetPassword, supabaseMode, 
   }
   async function resetPassword() {
     localStorage.setItem("glassOrdersLastUsername", username);
-    if (email) localStorage.setItem("glassOrdersLastEmail", email);
-    await onResetPassword?.({ username, email });
+    if (username.includes("@")) localStorage.setItem("glassOrdersLastEmail", username);
+    else if (email) localStorage.setItem("glassOrdersLastEmail", email);
+    await onResetPassword?.({ username, email: username.includes("@") ? username : email });
   }
   return (
     <main className="login-shell" dir="rtl">
@@ -6190,16 +6364,14 @@ function LoginView({ onLogin, onSetupLocalAdmin, onResetPassword, supabaseMode, 
         </div>
         <p className="login-intro">منصة متكاملة لإدارة أوامر الزجاج، الموردين، الاستلام، التصنيع والتقارير.</p>
         <form className="login-form" onSubmit={submit}>
-          {!supabaseMode && (
-            <Field label="اسم المستخدم">
-              <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" required />
-            </Field>
-          )}
-          {supabaseMode && (
-            <Field label="البريد المسجل">
-              <input type="email" dir="ltr" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" placeholder="name@example.com" required />
-            </Field>
-          )}
+          <Field label={supabaseMode ? "اسم المستخدم أو البريد الإلكتروني" : "اسم المستخدم"}>
+            <input
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              required
+            />
+          </Field>
           <Field label="كلمة المرور">
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
           </Field>
@@ -6209,7 +6381,7 @@ function LoginView({ onLogin, onSetupLocalAdmin, onResetPassword, supabaseMode, 
           </button>
           {supabaseMode && (
             <div className="login-secondary-actions">
-              <button type="button" onClick={resetPassword} disabled={busy || !email}><KeyRound size={16} />إعادة تعيين كلمة المرور</button>
+              <button type="button" onClick={resetPassword} disabled={busy || !username}><KeyRound size={16} />إعادة تعيين كلمة المرور</button>
             </div>
           )}
           {localSetupMode && (
@@ -6235,9 +6407,11 @@ function LoginView({ onLogin, onSetupLocalAdmin, onResetPassword, supabaseMode, 
 function PasswordRecoveryModal({ busy, onSave, onClose }) {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const passwordValid = password.length >= 10 && password.length <= 256;
+  const passwordsMatch = password === confirm;
   async function submit(event) {
     preventCancelableDefault(event);
-    if (!password || password !== confirm) return;
+    if (!passwordValid || !passwordsMatch) return;
     await onSave(password);
   }
   return (
@@ -6245,18 +6419,21 @@ function PasswordRecoveryModal({ busy, onSave, onClose }) {
       <form className="modal recovery-modal" onSubmit={submit}>
         <div className="panel-head">
           <h2><KeyRound size={18} /> تحديث كلمة مرور Supabase</h2>
-          <button type="button" onClick={onClose}><XCircle size={18} />إغلاق</button>
+          <button type="button" onClick={onClose} disabled={busy}><XCircle size={18} />إغلاق</button>
         </div>
         <div className="form-grid">
           <Field label="كلمة المرور الجديدة">
-            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" required />
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" minLength={10} maxLength={256} required />
           </Field>
           <Field label="تأكيد كلمة المرور">
-            <input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} autoComplete="new-password" required />
+            <input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} autoComplete="new-password" minLength={10} maxLength={256} required />
           </Field>
+          <p className={`hint${password && !passwordValid ? " danger-text" : ""}`} aria-live="polite">
+            {password && !passwordValid ? "كلمة المرور يجب ألا تقل عن 10 أحرف." : confirm && !passwordsMatch ? "تأكيد كلمة المرور غير مطابق." : "استخدم 10 أحرف على الأقل."}
+          </p>
         </div>
         <div className="actions modal-actions">
-          <button className="primary" type="submit" disabled={busy || !password || password !== confirm}><Save size={18} />حفظ كلمة المرور</button>
+          <button className="primary" type="submit" disabled={busy || !passwordValid || !passwordsMatch}><Save size={18} />حفظ كلمة المرور</button>
         </div>
       </form>
     </div>
@@ -7789,12 +7966,13 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   }, [drawingFocusIndex, tableFullScreen]);
   const entryStackClass = [
     "stack",
+    "entry-screen",
     tableFullScreen ? "table-fullscreen-active" : "",
     drawingFocusIndex >= 0 ? "drawing-mode-active" : ""
   ].filter(Boolean).join(" ");
   return (
     <div className={entryStackClass}>
-      {drawingFocusIndex < 0 && <section className="panel">
+      {drawingFocusIndex < 0 && <section className="panel entry-order-panel">
         <div className="panel-head">
           <div>
             <h2>بيانات الطلب</h2>
@@ -10944,7 +11122,7 @@ function StatementTable({ statement, onOpen, canEditOrder }) {
   );
 }
 
-function PreviewModal({ preview, currentUser, logoSrc, onClose, onOpenOrder }) {
+function PreviewModal({ preview, currentUser, logoSrc, onClose }) {
   const contentRef = useRef(null);
   const title = preview.type === "statement"
     ? "تقرير مساحات الزجاج"
@@ -10975,53 +11153,44 @@ function PreviewModal({ preview, currentUser, logoSrc, onClose, onOpenOrder }) {
   }
   return (
     <div className="modal-backdrop">
-      <div className="modal large">
-        <div className="panel-head">
+      <div className="modal large report-preview-modal">
+        <div className="panel-head report-preview-toolbar">
           <h2>{title}</h2>
           <div className="actions">
-            {preview.type === "order" && canCurrentUserEditOrder(currentUser, preview.order) && (
-              <button type="button" title="تعديل الطلب" onClick={() => onOpenOrder?.(preview.order)}>
-                <Pencil size={16} />
-                تعديل الطلب
-              </button>
-            )}
             {preview.type === "supplier" && <button onClick={handlePrint}><Printer size={16} />طباعة</button>}
             <button onClick={handlePdfExport}><FileDown size={16} />PDF</button>
             <button onClick={() => exportPreviewExcel(preview, currentUser)}><FileSpreadsheet size={16} />Excel</button>
             <button onClick={onClose}>إغلاق</button>
           </div>
         </div>
-        <div ref={contentRef} className="preview-page">
-          {preview.type === "order" && <OrderReport order={preview.order} currentUser={currentUser} logoSrc={logoSrc} />}
-          {preview.type === "statement" && (
-            <>
-              <ReportHeader title="تقرير مساحات الزجاج" logoSrc={logoSrc} />
-              <StatementTable
+        <div className="report-preview-scroll">
+          <div
+            ref={contentRef}
+            className={`preview-page report-preview-page ${preview.type === "orderStatus" ? "order-status-preview-page" : ""}`}
+          >
+            {preview.type === "order" && <OrderReport order={preview.order} currentUser={currentUser} logoSrc={logoSrc} />}
+            {preview.type === "statement" && (
+              <>
+                <ReportHeader title="تقرير مساحات الزجاج" logoSrc={logoSrc} />
+                <StatementTable statement={preview.statement} />
+                <ReportFooter currentUser={currentUser} />
+              </>
+            )}
+            {preview.type === "supplier" && (
+              <SupplierReport
                 statement={preview.statement}
-                onOpen={onOpenOrder}
-                canEditOrder={(order) => canCurrentUserEditOrder(currentUser, order)}
+                currentUser={currentUser}
+                logoSrc={logoSrc}
               />
-              <ReportFooter currentUser={currentUser} />
-            </>
-          )}
-          {preview.type === "supplier" && (
-            <SupplierReport
-              statement={preview.statement}
-              currentUser={currentUser}
-              logoSrc={logoSrc}
-              onEditOrder={onOpenOrder}
-              canEditOrder={(order) => canCurrentUserEditOrder(currentUser, order)}
-            />
-          )}
-          {preview.type === "orderStatus" && (
-            <OrderStatusReport
-              report={sanitizeOrderStatusReportCosts(preview.report, currentUser)}
-              currentUser={currentUser}
-              logoSrc={logoSrc}
-              onEditOrder={onOpenOrder}
-              canEditOrder={(order) => canCurrentUserEditOrder(currentUser, order)}
-            />
-          )}
+            )}
+            {preview.type === "orderStatus" && (
+              <OrderStatusReport
+                report={sanitizeOrderStatusReportCosts(preview.report, currentUser)}
+                currentUser={currentUser}
+                logoSrc={logoSrc}
+              />
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -12100,10 +12269,10 @@ function OrderStatusMiniTable({ report, currentUser }) {
   );
 }
 
-function OrderStatusReport({ report, currentUser, logoSrc, onEditOrder, canEditOrder }) {
+function OrderStatusReport({ report, currentUser, logoSrc }) {
   const showCosts = !!report.showCosts && canCurrentUserViewCosts(currentUser);
   return (
-    <div className="report">
+    <div className="report order-status-report">
       <ReportHeader title="تقرير حالة طلبات الزجاج" logoSrc={logoSrc} />
       <ReportTiming items={[{ label: "تاريخ الإصدار", value: report.generatedAt, exact: true }]} />
       <div className="report-meta">
@@ -12119,16 +12288,16 @@ function OrderStatusReport({ report, currentUser, logoSrc, onEditOrder, canEditO
           <React.Fragment key={supplier.supplier}>
             {supplier.rows.map((row) => (
               <div className="report-row order-status-report-row" key={row.orderId}>
-                <span dir="ltr" className="keep-line">{row.documentId}</span><span>{[row.customer, row.project].filter(Boolean).join(" / ")}</span><span className="report-order-number-cell"><bdi dir="ltr">{row.orderNo}</bdi>{onEditOrder && row.sourceOrder && (!canEditOrder || canEditOrder(row.sourceOrder)) && <button type="button" className="report-order-edit" title="تعديل الطلب" onClick={() => onEditOrder(row.sourceOrder)}><Pencil size={12} /></button>}</span><span dir="ltr" className="keep-line">{formatStatusDate(row.date)}</span><ReportGlassBreakdown entries={row.glassEntries} /><span className="keep-line">{money(row.quantity)}</span><span className="keep-line">{money(row.receivedQuantity)}</span><span className="keep-line">{money(row.remainingQuantity)}</span><span className="keep-line">{square(row.area)}</span><span>{row.statusText}</span>{showCosts && <span>{money(row.cost)}</span>}
+                <span dir="ltr" className="keep-line">{row.documentId}</span><span>{[row.customer, row.project].filter(Boolean).join(" / ")}</span><span className="report-order-number-cell"><bdi dir="ltr">{row.orderNo}</bdi></span><span dir="ltr" className="keep-line">{formatStatusDate(row.date)}</span><ReportGlassBreakdown entries={row.glassEntries} /><span className="keep-line">{money(row.quantity)}</span><span className="keep-line">{money(row.receivedQuantity)}</span><span className="keep-line">{money(row.remainingQuantity)}</span><span className="keep-line">{square(row.area)}</span><span>{row.statusText}</span>{showCosts && <span>{money(row.cost)}</span>}
               </div>
             ))}
-            <div className="report-row order-status-report-row subtotal">
-              <span className="subtotal-label">إجمالي المورد {supplier.supplier}</span><span></span><span></span><span></span><span></span><span>{money(supplier.subtotal.quantity)}</span><span>{money(supplier.subtotal.receivedQuantity)}</span><span>{money(supplier.subtotal.remainingQuantity)}</span><span>{square(supplier.subtotal.area)}</span><span></span>{showCosts && <span>{money(supplier.subtotal.cost)}</span>}
+            <div className="report-row order-status-report-row subtotal supplier-subtotal">
+              <span className="subtotal-label">إجمالي المورد {supplier.supplier}</span><span>{money(supplier.subtotal.quantity)}</span><span>{money(supplier.subtotal.receivedQuantity)}</span><span>{money(supplier.subtotal.remainingQuantity)}</span><span>{square(supplier.subtotal.area)}</span><span></span>{showCosts && <span>{money(supplier.subtotal.cost)}</span>}
             </div>
           </React.Fragment>
         ))}
         <div className="report-row order-status-report-row total">
-          <span className="subtotal-label">{report.suppliers.length > 1 ? "الإجمالي الكلي" : "إجمالي النتائج"}</span><span></span><span></span><span></span><span></span><span>{money(report.total.quantity)}</span><span>{money(report.total.receivedQuantity)}</span><span>{money(report.total.remainingQuantity)}</span><span>{square(report.total.area)}</span><span></span>{showCosts && <span>{report.suppliers.length > 1 ? money(report.total.cost) : ""}</span>}
+          <span className="subtotal-label">{report.suppliers.length > 1 ? "الإجمالي الكلي" : "إجمالي النتائج"}</span><span>{money(report.total.quantity)}</span><span>{money(report.total.receivedQuantity)}</span><span>{money(report.total.remainingQuantity)}</span><span>{square(report.total.area)}</span><span></span>{showCosts && <span>{report.suppliers.length > 1 ? money(report.total.cost) : ""}</span>}
         </div>
       </div>
       <ReportFooter currentUser={currentUser} />
@@ -12136,7 +12305,7 @@ function OrderStatusReport({ report, currentUser, logoSrc, onEditOrder, canEditO
   );
 }
 
-function SupplierStatementOrderBlock({ order, showRunningBalance = false, onEditOrder, canEditOrder }) {
+function SupplierStatementOrderBlock({ order, showRunningBalance = false }) {
   return (
     <section className="supplier-statement-order-block">
       <div className="supplier-statement-order-title">
@@ -12144,20 +12313,7 @@ function SupplierStatementOrderBlock({ order, showRunningBalance = false, onEdit
           <strong>الطلب <bdi dir="ltr">{displayOrderNo(order.orderNo)}</bdi></strong>
           <span>إذن <bdi dir="ltr">{order.documentId || orderDocumentId(order.order)}</bdi></span>
         </div>
-        <div>
-          {showRunningBalance && <span>الرصيد بعد الطلب: <strong>{money(order.balanceAfter)}</strong></span>}
-          {onEditOrder && (!canEditOrder || canEditOrder(order.order)) && (
-            <button
-              className="supplier-statement-edit"
-              type="button"
-              title="تعديل الطلب"
-              onClick={() => onEditOrder(order.order)}
-            >
-              <Pencil size={14} />
-              تعديل الطلب
-            </button>
-          )}
-        </div>
+        {showRunningBalance && <div><span>الرصيد بعد الطلب: <strong>{money(order.balanceAfter)}</strong></span></div>}
       </div>
       <div className="report-table supplier-statement-order-table">
         <div className="report-row supplier-statement-order-summary-row head">
@@ -12206,7 +12362,7 @@ function SupplierStatementOrderBlock({ order, showRunningBalance = false, onEdit
   );
 }
 
-function SupplierReport({ statement, currentUser, logoSrc, onEditOrder, canEditOrder }) {
+function SupplierReport({ statement, currentUser, logoSrc }) {
   if (!statement) return null;
   const isRange = statement.mode === RANGE_STATEMENT_MODE;
   const supplier = statement.supplier || {};
@@ -12257,8 +12413,6 @@ function SupplierReport({ statement, currentUser, logoSrc, onEditOrder, canEditO
                     key={`order-${entry.id}`}
                     order={entry}
                     showRunningBalance
-                    onEditOrder={onEditOrder}
-                    canEditOrder={canEditOrder}
                   />
                 ) : (
                   <div className="report-table supplier-statement-payment-table" key={`payment-${entry.id}`}>
@@ -12303,8 +12457,6 @@ function SupplierReport({ statement, currentUser, logoSrc, onEditOrder, canEditO
               <SupplierStatementOrderBlock
                 key={`selected-${order.id}`}
                 order={order}
-                onEditOrder={onEditOrder}
-                canEditOrder={canEditOrder}
               />
             ))}
             {!statement.orders.length && <p className="supplier-statement-empty">لم يتم اختيار طلبات لهذا الكشف.</p>}
@@ -12869,10 +13021,13 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
           can_view_costs: newUser.role === "admin" || newUser.can_view_costs === true,
           is_active: newUser.is_active === false ? false : true
         };
-        if (!payload.username || !payload.display_name || !payload.email) throw new Error("اكتب اسم الدخول والاسم والبريد.");
-        const result = await client.from("users").insert(payload).select(USER_PUBLIC_COLUMNS).single();
-        if (result.error) throw result.error;
-        user = result.data;
+        const password = String(newUser.password || "");
+        if (!payload.username || !payload.display_name || !payload.email || password.length < 10) {
+          throw new Error("اكتب اسم الدخول والاسم والبريد وكلمة مرور لا تقل عن 10 أحرف.");
+        }
+        const result = await invokeGlassAuth("admin-create-user", { profile: payload, password });
+        user = result.profile;
+        if (!user?.id) throw new Error("لم تُرجع خدمة المستخدمين ملفاً صالحاً.");
       } else {
         user = await localRequest("/api/users", { method: "POST", body: JSON.stringify(newUser) }, 8000);
       }
@@ -12880,7 +13035,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
       setData((current) => ({ ...current, users: [...(current.users || []), user] }));
       setNewUser({ username: "", display_name: "", email: "", password: "", role: "user", can_view_costs: false, is_active: true });
       setMessage(client
-        ? "تمت إضافة ملف المستخدم. أنشئ المستخدم أو أرسل الدعوة من Supabase Auth بنفس البريد لربط تسجيل الدخول."
+        ? "تم إنشاء المستخدم وربط حساب Supabase Auth. يمكنه تسجيل الدخول باسم المستخدم وكلمة المرور."
         : "تم إضافة المستخدم.");
     } catch (error) {
       setMessage(`تعذر إضافة المستخدم: ${safeErrorMessage(error)}`);
@@ -12899,10 +13054,16 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
         if (patch.username !== undefined) patch.username = cleanName(patch.username);
         if (patch.display_name !== undefined) patch.display_name = cleanName(patch.display_name);
         if (patch.email !== undefined) patch.email = cleanName(patch.email).toLocaleLowerCase() || null;
+        const newPassword = String(patch.password || "");
         delete patch.password;
-        const result = await client.from("users").update(patch).eq("id", userId).select(USER_PUBLIC_COLUMNS).single();
-        if (result.error) throw result.error;
-        updated = result.data;
+        if (newPassword && newPassword.length < 10) throw new Error("كلمة المرور الجديدة يجب ألا تقل عن 10 أحرف.");
+        const result = await invokeGlassAuth("admin-update-user", {
+          profileId: userId,
+          patch,
+          newPassword
+        });
+        updated = result.profile;
+        if (!updated?.id) throw new Error("لم تُرجع خدمة المستخدمين ملفاً صالحاً.");
       } else {
         updated = await localRequest(`/api/users/${encodeURIComponent(userId)}`, { method: "PUT", body: JSON.stringify(editingUser) }, 8000);
       }
@@ -13377,11 +13538,9 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
               <Field label="الاسم في التقارير">
                 <input value={newUser.display_name} onChange={(event) => setNewUser({ ...newUser, display_name: event.target.value })} placeholder="John Doe" required />
               </Field>
-              {!supabaseEnabled() && (
-                <Field label="كلمة المرور">
-                  <input type="password" minLength={10} value={newUser.password} onChange={(event) => setNewUser({ ...newUser, password: event.target.value })} required />
-                </Field>
-              )}
+              <Field label="كلمة المرور">
+                <input type="password" minLength={10} value={newUser.password} onChange={(event) => setNewUser({ ...newUser, password: event.target.value })} required />
+              </Field>
               <Field label="الدور">
                 <select value={newUser.role} onChange={(event) => setNewUser({ ...newUser, role: event.target.value })}>
                   <option value="user">مستخدم</option>
@@ -13406,7 +13565,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
                     <th>الدور</th>
                     <th>عرض التكلفة</th>
                     <th>الحالة</th>
-                    <th>{supabaseEnabled() ? "تسجيل الدخول" : "كلمة مرور جديدة"}</th>
+                    <th>كلمة مرور جديدة</th>
                     <th>آخر دخول</th>
                     <th>إجراءات</th>
                   </tr>
@@ -13437,9 +13596,16 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
                               <option value="false">موقوف</option>
                             </select>
                           </td>
-                          <td>{supabaseEnabled()
-                            ? <span className="hint">Supabase Auth</span>
-                            : <input type="password" minLength={10} value={editingUser.password || ""} onChange={(event) => setEditingUser({ ...editingUser, password: event.target.value })} placeholder="اتركها فارغة" />}</td>
+                          <td>
+                            <input
+                              type="password"
+                              minLength={10}
+                              value={editingUser.password || ""}
+                              onChange={(event) => setEditingUser({ ...editingUser, password: event.target.value })}
+                              required={supabaseEnabled() && !user.auth_user_id}
+                              placeholder={supabaseEnabled() && !user.auth_user_id ? "مطلوبة لربط الحساب" : "اتركها فارغة دون تغيير"}
+                            />
+                          </td>
                           <td dir="ltr">{user.last_login_at || ""}</td>
                           <td className="row-actions">
                             <button className="tiny primary" type="button" onClick={() => saveUser(user.id)}>حفظ</button>
@@ -13454,7 +13620,11 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
                           <td>{user.role === "admin" ? "مدير" : "مستخدم"}</td>
                           <td>{canCurrentUserViewCosts(user) ? "نعم" : "لا"}</td>
                           <td>{user.is_active === false ? "موقوف" : "نشط"}</td>
-                          <td>{supabaseEnabled() ? "Supabase Auth" : ""}</td>
+                          <td>{supabaseEnabled()
+                            ? user.auth_user_id
+                              ? "مرتبط بـ Supabase Auth"
+                              : "غير مرتبط — أدخل كلمة مرور ثم احفظ"
+                            : ""}</td>
                           <td dir="ltr">{user.last_login_at || ""}</td>
                           <td className="row-actions">
                             <button className="tiny" type="button" onClick={() => { setEditingUserId(user.id); setEditingUser({}); }}>تعديل</button>
@@ -13865,6 +14035,55 @@ function reportPrintCss() {
       unicode-bidi: isolate;
       white-space: nowrap;
     }
+    .report-timing {
+      margin: 0 0 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      color: var(--report-text);
+      font-size: 11px;
+      line-height: 1.25;
+      break-inside: avoid;
+      page-break-inside: avoid;
+    }
+    .order-status-report .report-timing {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .report-date-card {
+      min-width: 0;
+      border: 1px solid var(--report-border);
+      border-radius: 6px;
+      padding: 7px 9px;
+      background: var(--report-row-background);
+      display: grid;
+      grid-template-columns: 86px minmax(0, 1fr);
+      gap: 4px 10px;
+      align-items: center;
+      direction: rtl;
+    }
+    .report-date-card strong {
+      grid-row: 1 / span 2;
+      color: var(--report-accent);
+      white-space: nowrap;
+    }
+    .report-date-card span {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 54px;
+      gap: 8px;
+      align-items: center;
+      direction: ltr;
+    }
+    .report-date-card bdi,
+    .report-date-card small {
+      white-space: nowrap;
+      font-weight: 800;
+    }
+    .report-date-card bdi { justify-self: end; }
+    .report-date-card small {
+      justify-self: start;
+      color: var(--report-muted-text);
+    }
     .report-meta {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -13946,11 +14165,89 @@ function reportPrintCss() {
         minmax(44px, .5fr)
         minmax(52px, .62fr);
     }
-    .order-status-report-row { grid-template-columns: 110px minmax(190px, 1.25fr) 126px 118px 72px 90px 116px; font-size: 12px; line-height: 1.35; }
+    .order-status-report {
+      min-width: 0;
+      max-width: 100%;
+    }
+    .order-status-report-table.without-cost .order-status-report-row {
+      grid-template-columns:
+        minmax(0, .78fr)
+        minmax(0, 1.38fr)
+        minmax(0, .82fr)
+        minmax(0, .74fr)
+        minmax(0, 2.14fr)
+        repeat(3, minmax(0, .54fr))
+        minmax(0, .62fr)
+        minmax(0, .82fr);
+      font-size: 9.5px;
+      line-height: 1.32;
+    }
+    .order-status-report-table.with-cost .order-status-report-row {
+      grid-template-columns:
+        minmax(0, .74fr)
+        minmax(0, 1.28fr)
+        minmax(0, .76fr)
+        minmax(0, .7fr)
+        minmax(0, 1.94fr)
+        repeat(3, minmax(0, .5fr))
+        minmax(0, .58fr)
+        minmax(0, .74fr)
+        minmax(0, .72fr);
+      font-size: 9px;
+      line-height: 1.3;
+    }
+    .order-status-report-row > span {
+      padding: 6px 4px;
+      overflow-wrap: anywhere;
+      word-break: normal;
+      white-space: normal;
+    }
+    .order-status-report-row.head > span,
+    .order-status-report-row .keep-line {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .report-order-number-cell {
+      min-width: 0;
+      justify-content: center;
+    }
+    .report-glass-breakdown {
+      min-width: 0;
+      display: grid !important;
+      align-content: center;
+      gap: 4px;
+      white-space: normal;
+    }
+    .report-glass-breakdown > div {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+      padding-block: 3px;
+    }
+    .report-glass-breakdown > div + div {
+      border-top: 1px dashed var(--report-border);
+    }
+    .report-glass-breakdown strong,
+    .report-glass-breakdown span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .report-glass-breakdown span {
+      color: var(--report-muted-text);
+      font-size: .9em;
+    }
     .compact-report .order-status-report-row { grid-template-columns: 150px 112px minmax(190px, 1.25fr) 128px 72px 88px 116px; }
     .supplier-report-row { grid-template-columns: 118px minmax(230px, 1fr) 104px 104px 112px; }
     .order-status-report-row.subtotal .subtotal-label,
-    .order-status-report-row.total .subtotal-label { grid-column: 1 / 5; justify-content: center; }
+    .order-status-report-row.total .subtotal-label {
+      grid-column: span 5;
+      justify-content: center;
+      text-align: center;
+    }
+    .order-status-report-row.supplier-subtotal {
+      border-block: 1.5px solid var(--report-accent);
+      background: color-mix(in srgb, var(--report-total-background) 82%, var(--report-row-background));
+    }
     .supplier-report-row.total .subtotal-label,
     .statement-subtotal-label { grid-column: 1 / 3; justify-content: center; }
     .supplier-statement-opening-table { margin-bottom: 14px; }
@@ -14050,7 +14347,11 @@ function reportPrintCss() {
       border-inline-start: 3px solid var(--report-accent);
       padding-inline-start: 8px;
     }
-    .supplier-statement-edit { display: none !important; }
+    .report button,
+    .report-order-edit,
+    .statement-order-edit,
+    .supplier-statement-edit,
+    [data-report-edit-order] { display: none !important; }
     .description-header,
     .description-cell {
       border-left: 1px solid var(--report-border) !important;
@@ -14279,8 +14580,21 @@ function reportPrintCss() {
   `;
 }
 
+const REPORT_EDIT_CONTROL_SELECTOR = [
+  ".report-order-edit",
+  ".statement-order-edit",
+  ".supplier-statement-edit",
+  "[data-report-edit-order]",
+  'button[title="تعديل الطلب"]'
+].join(",");
+
+function removeReportEditControls(root) {
+  root?.querySelectorAll?.(REPORT_EDIT_CONTROL_SELECTOR).forEach((control) => control.remove());
+}
+
 function reportPrintDocumentHtml(element, fileName) {
   const clone = element.cloneNode(true);
+  removeReportEditControls(clone);
   normalizePrintReportImages(clone);
   const title = String(fileName || `${FULL_APP_NAME} Report`).replace(/\.pdf$/i, "");
   return `<!doctype html>
@@ -14455,6 +14769,7 @@ function pdfAvoidRanges(element, canvasHeight) {
 
 function preparePdfClone(clonedDocument, clonedElement) {
   clonedElement?.classList?.add("pdf-export-root");
+  removeReportEditControls(clonedElement);
   const style = clonedDocument.createElement("style");
   const rootStyle = getComputedStyle(document.documentElement);
   const reportVar = (name, fallback) => rootStyle.getPropertyValue(name).trim() || fallback;
@@ -15898,6 +16213,7 @@ function StatusVariantApp() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [currentUser, setCurrentUser] = useState(currentStoredUser);
+  const [sessionRestoreChecked, setSessionRestoreChecked] = useState(false);
   const [data, setData] = useState(statusVariantEmptyData);
   const [query, setQuery] = useState("");
   const [selectedSupplier, setSelectedSupplier] = useState("");
@@ -15912,6 +16228,8 @@ function StatusVariantApp() {
   const [accountOpen, setAccountOpen] = useState(false);
   const [appearance, setAppearance] = useState(readAppearanceSettings);
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [passwordRecoveryOpen, setPasswordRecoveryOpen] = useState(false);
+  useDesktopPasswordRecovery(setPasswordRecoveryOpen, setMessage, setCurrentUser);
   const pdfJobRef = useRef(null);
   const reportLogoSrc = appearance.reportLogoDataUrl || loadingLogo;
 
@@ -15932,7 +16250,29 @@ function StatusVariantApp() {
 
   useEffect(() => {
     let cancelled = false;
+    restoreSupabaseSessionUser().then((user) => {
+      if (cancelled) return;
+      if (user) setCurrentUser(user);
+      setSessionRestoreChecked(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const client = getSupabaseClient();
+    if (!client) return undefined;
+    const { data: listener } = client.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") setPasswordRecoveryOpen(true);
+    });
+    return () => listener?.subscription?.unsubscribe?.();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     async function bootstrap() {
+      if (!sessionRestoreChecked) return;
       if (!currentUser) {
         setData(statusVariantEmptyData());
         setSelectedOrderKey("");
@@ -15959,7 +16299,7 @@ function StatusVariantApp() {
     return () => {
       cancelled = true;
     };
-  }, [currentUser]);
+  }, [currentUser, sessionRestoreChecked]);
 
   const supplierNames = useMemo(() => uniqueValues((data.orders || []).map((order) => order.supplierName || "بدون مورد")), [data.orders]);
   const selectedStatusSet = useMemo(() => new Set(selectedStatuses), [selectedStatuses]);
@@ -16011,12 +16351,33 @@ function StatusVariantApp() {
     setLoading(true);
     try {
       await sendSupabasePasswordReset(credentials.username, credentials.email);
-      setMessage("تم إرسال رابط إعادة تعيين كلمة المرور.");
+      setMessage("تم قبول الطلب. إذا كان الحساب مرتبطاً ببريد Supabase صالح فسيصل رابط إعادة التعيين.");
     } catch (error) {
       setMessage(`تعذر إرسال إعادة التعيين: ${safeErrorMessage(error)}`);
     } finally {
       setLoading(false);
     }
+  }
+
+  async function completeStatusPasswordRecovery(newPassword) {
+    setLoading(true);
+    try {
+      if (String(newPassword || "").length < 10) throw new Error("كلمة المرور يجب ألا تقل عن 10 أحرف.");
+      const client = getSupabaseClient();
+      if (!client) throw new Error("اتصال Supabase غير متاح.");
+      const result = await client.auth.updateUser({ password: newPassword });
+      if (result.error) throw result.error;
+      await clearSupabaseRecoverySession(setPasswordRecoveryOpen, setCurrentUser);
+      setMessage("تم تحديث كلمة المرور. يمكنك تسجيل الدخول الآن.");
+    } catch (error) {
+      setMessage(`تعذر تحديث كلمة المرور: ${safeErrorMessage(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function closeStatusPasswordRecovery() {
+    await clearSupabaseRecoverySession(setPasswordRecoveryOpen, setCurrentUser);
   }
 
   async function refreshStatusOrders() {
@@ -16113,6 +16474,13 @@ function StatusVariantApp() {
           logoSrc={appLogo}
           version={runtimeVersion}
         />
+        {passwordRecoveryOpen && (
+          <PasswordRecoveryModal
+            busy={loading}
+            onSave={completeStatusPasswordRecovery}
+            onClose={closeStatusPasswordRecovery}
+          />
+        )}
       </main>
     );
   }
@@ -16120,6 +16488,13 @@ function StatusVariantApp() {
   return (
     <main className="status-app-shell" dir="rtl">
       {loading && <LoadingLayer logoSrc={loadingLogo} stage="جاري تحديث حالة الطلبات..." version={runtimeVersion} />}
+      {passwordRecoveryOpen && (
+        <PasswordRecoveryModal
+          busy={loading}
+          onSave={completeStatusPasswordRecovery}
+          onClose={closeStatusPasswordRecovery}
+        />
+      )}
       <header className="status-mobile-header">
         <strong>حالة الطلبات</strong>
         <span className={data.source === "supabase" ? "connection-dot online" : "connection-dot"} title={connectionLabel} />
@@ -16302,7 +16677,7 @@ function StatusReportPreview({ report, currentUser, logoSrc, onClose, onPdf, onS
         <button type="button" disabled={pdfBusy} onClick={onShare}><Download size={16} />مشاركة</button>
       </div>
       <div className="status-preview-scroll">
-        <div className="preview-page">
+        <div className="preview-page order-status-preview-page">
           <OrderStatusReport report={sanitizeOrderStatusReportCosts(report, currentUser)} currentUser={currentUser} logoSrc={logoSrc} />
         </div>
       </div>

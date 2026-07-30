@@ -3,6 +3,11 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const {
+  AUTH_RECOVERY_PROTOCOL,
+  authRecoveryUrlFromArgv,
+  sanitizeAuthRecoveryUrl
+} = require("./auth-recovery-link.cjs");
 
 let localServerProcess = null;
 const localServerLogs = [];
@@ -20,6 +25,7 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let rendererHasUnsavedEntry = false;
+let pendingAuthRecoveryUrl = authRecoveryUrlFromArgv(process.argv);
 const activeChildren = new Set();
 let shutdownPromise = null;
 
@@ -47,6 +53,11 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 }
+
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  queueAuthRecoveryUrl(url);
+});
 
 function helperRoot() {
   return app.isPackaged ? path.join(process.resourcesPath, "app.asar.unpacked") : root;
@@ -450,6 +461,40 @@ function safeExternalUrl(url) {
   } catch {
     return "";
   }
+}
+
+function registerAuthRecoveryProtocol() {
+  if (process.defaultApp && process.argv[1]) {
+    return app.setAsDefaultProtocolClient(
+      AUTH_RECOVERY_PROTOCOL,
+      process.execPath,
+      [path.resolve(process.argv[1])]
+    );
+  }
+  return app.setAsDefaultProtocolClient(AUTH_RECOVERY_PROTOCOL);
+}
+
+function notifyAuthRecoveryAvailable() {
+  if (
+    !pendingAuthRecoveryUrl ||
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    mainWindow.webContents.isLoadingMainFrame()
+  ) {
+    return;
+  }
+  mainWindow.webContents.send("glass-orders:auth-recovery-available");
+}
+
+function queueAuthRecoveryUrl(url) {
+  const safeUrl = sanitizeAuthRecoveryUrl(url);
+  if (!safeUrl) return false;
+  pendingAuthRecoveryUrl = safeUrl;
+  if (app.isReady()) {
+    showWindow();
+    notifyAuthRecoveryAvailable();
+  }
+  return true;
 }
 
 function showDesktopNotification(payload = {}) {
@@ -1165,6 +1210,7 @@ function createWindow(options = {}) {
   } else {
     win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
+  win.webContents.on("did-finish-load", notifyAuthRecoveryAvailable);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
@@ -1203,13 +1249,19 @@ app.whenReady().then(() => {
   const hiddenLaunch = shouldLaunchHidden();
   app.setName("Y.D Glass Manager");
   if (process.platform === "win32") app.setAppUserModelId("com.hgad.glassorders");
+  registerAuthRecoveryProtocol();
   createApplicationMenu();
-  createWindow({ show: !hiddenLaunch });
+  createWindow({ show: pendingAuthRecoveryUrl ? true : !hiddenLaunch });
   createTray();
   startRememberedTelegramBot();
 });
 
 app.on("second-instance", (_event, commandLine, _workingDirectory) => {
+  const authRecoveryUrl = authRecoveryUrlFromArgv(commandLine);
+  if (authRecoveryUrl) {
+    queueAuthRecoveryUrl(authRecoveryUrl);
+    return;
+  }
   if ((commandLine || []).includes(BOT_BACKGROUND_ARG)) {
     startRememberedTelegramBot();
     return;
@@ -1219,6 +1271,12 @@ app.on("second-instance", (_event, commandLine, _workingDirectory) => {
 
 ipcMain.handle("glass-orders:start-local-server", () => startLocalServer());
 ipcMain.handle("glass-orders:app-version", () => app.getVersion());
+ipcMain.handle("glass-orders:consume-auth-recovery-url", (event) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return "";
+  const callbackUrl = pendingAuthRecoveryUrl;
+  pendingAuthRecoveryUrl = "";
+  return callbackUrl;
+});
 ipcMain.handle("glass-orders:stop-local-server", () => stopLocalServer());
 ipcMain.handle("glass-orders:local-server-logs", () => localServerLogs);
 ipcMain.handle("glass-orders:browser-server-start", () => startGlassBrowserServer({ open: true }));
