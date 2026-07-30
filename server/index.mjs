@@ -254,9 +254,8 @@ function startTelegramBot(options = {}) {
         EXCEL_FILE: process.env.EXCEL_FILE || workbookPath,
         VITE_SUPABASE_URL: options.supabaseUrl || process.env.VITE_SUPABASE_URL || "",
         VITE_SUPABASE_ANON_KEY: options.supabaseKey || process.env.VITE_SUPABASE_ANON_KEY || "",
-        TELEGRAM_SUPABASE_EMAIL: options.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL || "",
-        TELEGRAM_SUPABASE_PASSWORD: options.supabasePassword || process.env.TELEGRAM_SUPABASE_PASSWORD || "",
-        TELEGRAM_BOT_TOKEN: options.botToken || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || ""
+        TELEGRAM_SUPABASE_ACCESS_TOKEN: options.accessToken || "",
+        TELEGRAM_SUPABASE_REFRESH_TOKEN: options.refreshToken || ""
       }
     });
   } catch (error) {

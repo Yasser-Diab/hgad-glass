@@ -4212,30 +4212,6 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
 .settings-stack .panel-head h2 {
   font-size: 18px;
 }
-.telegram-credentials-card {
-  grid-column: 1 / -1;
-  display: grid;
-  gap: 11px;
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-2) 88%, transparent);
-}
-.telegram-credential-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.telegram-credentials-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-.telegram-credentials-card .hint {
-  margin: 0;
-}
 .appearance-grid {
   grid-template-columns: minmax(320px, 1.2fr) repeat(auto-fit, minmax(220px, 1fr));
 }
@@ -4318,8 +4294,7 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   min-height: 18px;
 }
 .server-card,
-.brand-settings-preview,
-.update-card {
+.brand-settings-preview {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -4327,21 +4302,6 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   border-radius: 8px;
   background: var(--surface-2);
   padding: 12px;
-}
-.update-card {
-  justify-content: space-between;
-}
-.update-card > div {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-.update-card span {
-  min-width: 0;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .logo-dropzone {
   grid-row: span 2;
@@ -4397,46 +4357,6 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   cursor: pointer;
 }
 .file-button input { display: none; }
-.log-console {
-  grid-column: 1 / -1;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-2);
-  overflow: hidden;
-}
-.log-console-head {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-}
-.log-console-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.log-console pre {
-  margin: 0;
-  min-height: 96px;
-  max-height: 156px;
-  border-radius: 0;
-  white-space: pre;
-  overflow: auto;
-  direction: ltr;
-  text-align: left;
-  user-select: text;
-  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  tab-size: 2;
-}
-.log-console.expanded pre {
-  min-height: 360px;
-  max-height: 58vh;
-}
 .brand-settings-preview {
   justify-content: center;
   min-height: 132px;
@@ -4965,68 +4885,6 @@ pre {
 .loading-layer footer small {
   color: #d9ba75;
 }
-.about-product-panel {
-  display: grid;
-  grid-template-columns: minmax(260px, .9fr) minmax(360px, 1.45fr);
-  align-items: center;
-  gap: 14px 18px;
-  overflow: visible;
-  background:
-    radial-gradient(circle at 12% 18%, rgba(216,168,63,.16), transparent 28%),
-    linear-gradient(135deg, color-mix(in srgb, var(--surface) 93%, #07131d), var(--surface));
-}
-.about-product-mark {
-  display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-}
-.about-product-mark > div:last-child {
-  display: grid;
-  gap: 4px;
-}
-.about-product-mark h2,
-.about-product-mark p {
-  margin: 0;
-}
-.about-product-mark h2 {
-  color: var(--gold);
-  font-weight: 900;
-  letter-spacing: .035em;
-  font-size: clamp(18px, 1.65vw, 24px);
-  line-height: 1.05;
-}
-.about-product-mark .brand-mark,
-.about-product-mark .brand-mark.small {
-  width: 72px;
-}
-.about-product-mark .brand-logo-img {
-  max-height: 72px;
-}
-.about-product-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(150px, 1fr));
-  gap: 7px;
-  margin: 0;
-}
-.about-product-grid > div {
-  display: grid;
-  gap: 3px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-2) 88%, transparent);
-}
-.about-product-grid span,
-.about-product-panel > small {
-  color: var(--muted);
-  font-size: 12px;
-}
-.about-product-panel > small {
-  grid-column: 1 / -1;
-  margin-top: -4px;
-  text-align: end;
-}
 .pdf-host { position: fixed; left: -200vw; top: 0; width: 1024px; background: var(--report-page-background); color: var(--report-text); }
 
 .status-app-shell {
@@ -5355,6 +5213,39 @@ pre {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr);
   }
+  .topbar {
+    min-height: 0;
+    padding-bottom: 10px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: 8px;
+  }
+  .topbar > div:first-child {
+    min-width: 0;
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .topbar h1 {
+    font-size: 24px;
+    line-height: 1.15;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .topbar p {
+    margin: 0;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .top-actions {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+    gap: 6px;
+  }
   .sidebar {
     position: fixed;
     inset-block: 0;
@@ -5441,12 +5332,6 @@ pre {
   .ticket-settings-grid,
   .selected-order-strip,
   .settings-grid { grid-template-columns: 1fr; }
-  .about-product-panel {
-    grid-template-columns: 1fr;
-  }
-  .telegram-credentials-grid {
-    grid-template-columns: 1fr;
-  }
   .mini-order-row { grid-template-columns: 110px 1fr 1fr; }
   .mini-order-row span:nth-of-type(3),
   .mini-order-row bdi { display: none; }
@@ -5682,9 +5567,6 @@ pre {
   .entry-paste-controls {
     width: 100%;
     align-items: stretch;
-  }
-  .about-product-grid {
-    grid-template-columns: 1fr;
   }
   .entry-paste-controls label {
     flex: 1 1 220px;

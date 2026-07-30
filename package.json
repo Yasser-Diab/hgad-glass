@@ -82,6 +82,7 @@
         "from": "telegram_excel_bot",
         "to": "telegram_excel_bot",
         "filter": [
+          ".env",
           "Cairo-Regular.ttf",
           "طلب شراء زجاج.xlsm"
         ]

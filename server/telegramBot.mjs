@@ -51,8 +51,8 @@ const workbookPath = env.EXCEL_FILE || env.GLASS_ORDERS_WORKBOOK_PATH || path.jo
 const sheetName = env.SHEET_NAME || "الادخال";
 const supabaseUrl = env.VITE_SUPABASE_URL || env.SUPABASE_URL || "";
 const supabaseKey = env.VITE_SUPABASE_ANON_KEY || env.SUPABASE_ANON_KEY || "";
-const supabaseBotEmail = env.TELEGRAM_SUPABASE_EMAIL || "";
-const supabaseBotPassword = env.TELEGRAM_SUPABASE_PASSWORD || "";
+const supabaseAccessToken = env.TELEGRAM_SUPABASE_ACCESS_TOKEN || "";
+const supabaseRefreshToken = env.TELEGRAM_SUPABASE_REFRESH_TOKEN || "";
 const telegramTopicName = env.TELEGRAM_TOPIC_NAME || "متابعة الكلف";
 const configuredTopicThreadId = Number(env.TELEGRAM_TOPIC_ID || env.TELEGRAM_MESSAGE_THREAD_ID || 0) || 0;
 const topicThreadByChat = new Map();
@@ -204,17 +204,24 @@ function rowGlassDescription(row) {
 }
 
 async function loadSupabase() {
-  if (!supabaseUrl || !supabaseKey || !supabaseBotEmail || !supabaseBotPassword) {
-    throw new Error("Supabase bot authentication is incomplete. Save the bot account in Y.D Glass Manager settings.");
+  if (!supabaseUrl || !supabaseKey || !supabaseAccessToken || !supabaseRefreshToken) {
+    throw new Error("The signed-in Supabase session is unavailable. Sign in to Y.D Glass Manager before starting Telegram.");
   }
-  const client = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false, autoRefreshToken: false } });
-  const authResult = await client.auth.signInWithPassword({
-    email: supabaseBotEmail,
-    password: supabaseBotPassword
+  const client = createClient(supabaseUrl, supabaseKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: true,
+      detectSessionInUrl: false
+    }
+  });
+  const authResult = await client.auth.setSession({
+    access_token: supabaseAccessToken,
+    refresh_token: supabaseRefreshToken
   });
   if (authResult.error || !authResult.data?.user?.id) {
-    throw authResult.error || new Error("Supabase bot login failed.");
+    throw authResult.error || new Error("The signed-in Supabase session could not be established for Telegram.");
   }
+  client.auth.startAutoRefresh?.();
   const profileResult = await client
     .from("users")
     .select("role, can_view_costs, is_active")
@@ -281,7 +288,7 @@ async function supabaseRpcAll(client, functionName, args = {}) {
 }
 
 async function loadDataSource() {
-  const supabaseConfigured = !!(supabaseUrl || supabaseKey || supabaseBotEmail || supabaseBotPassword);
+  const supabaseConfigured = !!(supabaseUrl || supabaseKey || supabaseAccessToken || supabaseRefreshToken);
   if (supabaseConfigured) return loadSupabase();
   return loadWorkbook();
 }

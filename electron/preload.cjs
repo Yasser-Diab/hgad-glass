@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld("glassOrdersDesktop", {
   browserServerStatus: () => ipcRenderer.invoke("glass-orders:browser-server-status"),
   startTelegramBot: (options) => ipcRenderer.invoke("glass-orders:start-telegram-bot", options),
   stopTelegramBot: (options) => ipcRenderer.invoke("glass-orders:stop-telegram-bot", options),
+  syncTelegramBotSession: (session) => ipcRenderer.invoke("glass-orders:sync-telegram-session", session),
   telegramBotStatus: () => ipcRenderer.invoke("glass-orders:telegram-bot-status"),
   telegramBotSettings: () => ipcRenderer.invoke("glass-orders:telegram-bot-settings"),
   updateTelegramBotSettings: (patch) => ipcRenderer.invoke("glass-orders:update-telegram-bot-settings", patch),

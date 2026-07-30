@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, dialog, Notification, safeStorage } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, dialog, Notification } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -8,12 +8,6 @@ const {
   authRecoveryUrlFromArgv,
   sanitizeAuthRecoveryUrl
 } = require("./auth-recovery-link.cjs");
-const {
-  encryptionAvailable,
-  mergeBotSettingsRecord,
-  normalizeBotSettingsRecord,
-  runtimeBotSettings
-} = require("./secure-bot-settings.cjs");
 
 let localServerProcess = null;
 const localServerLogs = [];
@@ -28,6 +22,7 @@ let telegramBotState = "stopped";
 let stoppingTelegramBot = false;
 let telegramRestartTimer = null;
 let telegramRestartBlocked = false;
+let telegramSupabaseSession = null;
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -41,12 +36,7 @@ const BOT_BACKGROUND_ARG = "--glass-orders-background-bot";
 const DEFAULT_BOT_SETTINGS = {
   enabled: false,
   openAtLogin: false,
-  startHiddenAtLogin: true,
-  supabaseUrl: "",
-  supabaseKey: "",
-  supabaseEmail: "",
-  botTokenCipher: "",
-  supabasePasswordCipher: ""
+  startHiddenAtLogin: true
 };
 const appIconPath = path.join(root, "icons", "app-icon.png");
 const trayIconPath = path.join(root, "icons", "tray-icon.png");
@@ -197,52 +187,74 @@ function writeJsonFile(filePath, payload) {
   return { ok: true, filePath };
 }
 
-function readBotSettingsRecord() {
+function normalizeBotSettings(settings = {}) {
+  return {
+    enabled: settings.enabled === true,
+    openAtLogin: settings.openAtLogin === true,
+    startHiddenAtLogin: settings.startHiddenAtLogin !== false
+  };
+}
+
+function readBotSettings() {
   try {
-    return normalizeBotSettingsRecord({
+    return normalizeBotSettings({
       ...DEFAULT_BOT_SETTINGS,
       ...JSON.parse(fs.readFileSync(botSettingsPath, "utf8"))
     });
   } catch {
-    return normalizeBotSettingsRecord(DEFAULT_BOT_SETTINGS);
+    return normalizeBotSettings(DEFAULT_BOT_SETTINGS);
   }
 }
 
-function readBotSettings() {
-  return runtimeBotSettings(readBotSettingsRecord(), safeStorage);
+function readBotFolderEnv() {
+  try {
+    return Object.fromEntries(
+      fs.readFileSync(path.join(botAssetsDir(), ".env"), "utf8")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#") && line.includes("="))
+        .map((line) => {
+          const index = line.indexOf("=");
+          return [
+            line.slice(0, index).trim(),
+            line.slice(index + 1).trim().replace(/^['"]|['"]$/g, "")
+          ];
+        })
+    );
+  } catch {
+    return {};
+  }
 }
 
-function normalizeBotSettings(settings = {}) {
-  return {
-    ...DEFAULT_BOT_SETTINGS,
-    enabled: settings.enabled === true,
-    openAtLogin: settings.openAtLogin === true,
-    startHiddenAtLogin: settings.startHiddenAtLogin !== false,
-    supabaseUrl: String(settings.supabaseUrl || ""),
-    supabaseKey: String(settings.supabaseKey || ""),
-    supabaseEmail: String(settings.supabaseEmail || "").trim().toLocaleLowerCase(),
-    botToken: String(settings.botToken || ""),
-    supabasePassword: String(settings.supabasePassword || "")
+function botTokenAvailable() {
+  const folderEnv = readBotFolderEnv();
+  return !!(
+    folderEnv.BOT_TOKEN ||
+    folderEnv.TELEGRAM_BOT_TOKEN ||
+    process.env.BOT_TOKEN ||
+    process.env.TELEGRAM_BOT_TOKEN
+  );
+}
+
+function normalizeTelegramSupabaseSession(session = {}) {
+  const normalized = {
+    supabaseUrl: String(session.supabaseUrl || "").trim(),
+    supabaseKey: String(session.supabaseKey || "").trim(),
+    accessToken: String(session.accessToken || ""),
+    refreshToken: String(session.refreshToken || "")
   };
+  return Object.values(normalized).every(Boolean) ? normalized : null;
 }
 
 function publicBotSettings(settings = readBotSettings()) {
   const normalized = normalizeBotSettings(settings);
-  const hasBotToken = !!(normalized.botToken || process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN);
-  const hasSupabaseAuth = !!(
-    (normalized.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL) &&
-    (normalized.supabasePassword || process.env.TELEGRAM_SUPABASE_PASSWORD)
-  );
   return {
     enabled: normalized.enabled,
     openAtLogin: normalized.openAtLogin,
     startHiddenAtLogin: normalized.startHiddenAtLogin,
     canOpenAtLogin: process.platform === "win32",
-    hasSupabase: !!(normalized.supabaseUrl && normalized.supabaseKey),
-    hasSupabaseAuth,
-    hasBotToken,
-    supabaseEmail: normalized.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL || "",
-    credentialStorageAvailable: encryptionAvailable(safeStorage)
+    hasBotToken: botTokenAvailable(),
+    hasSupabaseSession: !!telegramSupabaseSession
   };
 }
 
@@ -262,10 +274,8 @@ function applyBotLoginItemSettings(settings = readBotSettings()) {
 }
 
 function saveBotSettings(patch = {}) {
-  const currentRecord = readBotSettingsRecord();
-  const nextRecord = mergeBotSettingsRecord(currentRecord, patch, safeStorage);
-  writeJsonFile(botSettingsPath, nextRecord);
-  const next = runtimeBotSettings(nextRecord, safeStorage);
+  const next = normalizeBotSettings({ ...readBotSettings(), ...patch });
+  writeJsonFile(botSettingsPath, next);
   applyBotLoginItemSettings(next);
   return next;
 }
@@ -1040,21 +1050,12 @@ async function startTelegramBot(options = {}) {
   }
   stoppingTelegramBot = false;
   telegramRestartBlocked = false;
-  const currentSettings = readBotSettings();
-  const runSettings = normalizeBotSettings({
-    ...currentSettings,
-    supabaseUrl: options.supabaseUrl || currentSettings.supabaseUrl || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL,
-    supabaseKey: options.supabaseKey || currentSettings.supabaseKey || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY,
-    supabaseEmail: options.supabaseEmail || currentSettings.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL,
-    supabasePassword: options.supabasePassword || currentSettings.supabasePassword || process.env.TELEGRAM_SUPABASE_PASSWORD,
-    botToken: options.botToken || currentSettings.botToken || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN
-  });
+  const incomingSession = normalizeTelegramSupabaseSession(options);
+  if (incomingSession) telegramSupabaseSession = incomingSession;
+  const runSession = telegramSupabaseSession;
   const missingConfiguration = [
-    !runSettings.botToken && "Telegram bot token",
-    !runSettings.supabaseUrl && "Supabase URL",
-    !runSettings.supabaseKey && "Supabase anon key",
-    !runSettings.supabaseEmail && "Supabase bot email",
-    !runSettings.supabasePassword && "Supabase bot password"
+    !botTokenAvailable() && "Telegram bot token in telegram_excel_bot/.env",
+    !runSession && "signed-in Supabase session"
   ].filter(Boolean);
   if (missingConfiguration.length) {
     telegramBotState = "failed";
@@ -1064,7 +1065,7 @@ async function startTelegramBot(options = {}) {
     return botStatus();
   }
   if (options.remember) {
-    saveBotSettings({ ...runSettings, enabled: true });
+    saveBotSettings({ enabled: true });
   }
   if (telegramBotProcess && !telegramBotProcess.killed) return botStatus();
   telegramBotState = "starting";
@@ -1102,11 +1103,10 @@ async function startTelegramBot(options = {}) {
         GLASS_ORDERS_BOT_DIR: scriptDir,
         GLASS_ORDERS_WORKBOOK_PATH: process.env.GLASS_ORDERS_WORKBOOK_PATH || packagedWorkbookPath(),
         EXCEL_FILE: process.env.EXCEL_FILE || packagedWorkbookPath(),
-        VITE_SUPABASE_URL: runSettings.supabaseUrl || process.env.VITE_SUPABASE_URL || "",
-        VITE_SUPABASE_ANON_KEY: runSettings.supabaseKey || process.env.VITE_SUPABASE_ANON_KEY || "",
-        TELEGRAM_SUPABASE_EMAIL: runSettings.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL || "",
-        TELEGRAM_SUPABASE_PASSWORD: runSettings.supabasePassword || process.env.TELEGRAM_SUPABASE_PASSWORD || "",
-        TELEGRAM_BOT_TOKEN: runSettings.botToken || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || ""
+        VITE_SUPABASE_URL: runSession.supabaseUrl,
+        VITE_SUPABASE_ANON_KEY: runSession.supabaseKey,
+        TELEGRAM_SUPABASE_ACCESS_TOKEN: runSession.accessToken,
+        TELEGRAM_SUPABASE_REFRESH_TOKEN: runSession.refreshToken
       }
     }), "Telegram bot");
   } catch (error) {
@@ -1163,9 +1163,27 @@ async function stopTelegramBot(options = {}) {
 
 function startRememberedTelegramBot() {
   const settings = readBotSettings();
-  applyBotLoginItemSettings(settings);
+  saveBotSettings(settings);
   if (!settings.enabled) return;
-  startTelegramBot({ ...settings, remember: false }).catch((error) => pushBotLog(`Telegram bot failed to start: ${error.message}`));
+  telegramBotState = "waiting_for_session";
+  pushBotLog("Telegram bot is waiting for the signed-in Supabase session.");
+}
+
+async function syncTelegramBotSession(session = {}) {
+  const normalized = normalizeTelegramSupabaseSession(session);
+  if (!normalized) {
+    telegramSupabaseSession = null;
+    if (telegramBotProcess && !telegramBotProcess.killed) {
+      await stopTelegramBot({ remember: false });
+    }
+    telegramBotState = readBotSettings().enabled ? "waiting_for_session" : "stopped";
+    return botStatus();
+  }
+  telegramSupabaseSession = normalized;
+  if (readBotSettings().enabled && !(telegramBotProcess && !telegramBotProcess.killed)) {
+    return startTelegramBot({ ...normalized, remember: false });
+  }
+  return botStatus();
 }
 
 function showWindow(target) {
@@ -1341,6 +1359,7 @@ ipcMain.handle("glass-orders:browser-server-stop", () => stopGlassBrowserServer(
 ipcMain.handle("glass-orders:browser-server-status", () => browserServerStatus());
 ipcMain.handle("glass-orders:start-telegram-bot", (_event, options = {}) => startTelegramBot(options));
 ipcMain.handle("glass-orders:stop-telegram-bot", (_event, options = {}) => stopTelegramBot(options));
+ipcMain.handle("glass-orders:sync-telegram-session", (_event, session = {}) => syncTelegramBotSession(session));
 ipcMain.handle("glass-orders:telegram-bot-status", () => botStatus());
 ipcMain.handle("glass-orders:telegram-bot-settings", () => publicBotSettings());
 ipcMain.handle("glass-orders:update-telegram-bot-settings", (_event, patch = {}) => publicBotSettings(saveBotSettings(patch)));

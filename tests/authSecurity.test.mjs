@@ -45,7 +45,7 @@ test("Supabase login remains username-first and establishes the returned Auth se
 
 test("password reset uses the server resolver and never claims unconditional delivery", () => {
   assert.match(appSource, /invokeGlassAuth\("reset-password"/);
-  assert.match(appSource, /إذا كان الحساب مرتبطاً ببريد Supabase صالح/);
+  assert.match(appSource, /إذا كانت بيانات الحساب صحيحة فسيصل رابط إعادة التعيين/);
   assert.doesNotMatch(appSource, /تم إرسال رابط إعادة تعيين كلمة المرور إلى البريد المسجل لهذا المستخدم/);
   assert.match(edgeSource, /const generic = \{\s*accepted:\s*true/);
   assert.match(edgeSource, /if \(!profile\?\.auth_user_id \|\| !profile\.email/);
@@ -54,7 +54,7 @@ test("password reset uses the server resolver and never claims unconditional del
 test("admin user creation and password updates are routed through the secured function", () => {
   assert.match(appSource, /invokeGlassAuth\("admin-create-user"/);
   assert.match(appSource, /invokeGlassAuth\("admin-update-user"/);
-  assert.match(appSource, /غير مرتبط — أدخل كلمة مرور ثم احفظ/);
+  assert.match(appSource, /يحتاج كلمة مرور جديدة/);
   assert.match(appSource, /required=\{hasSupabaseConfig\(\) && !user\.auth_user_id\}/);
   assert.match(edgeSource, /async function requireActiveAdmin/);
   assert.match(edgeSource, /profile\.is_active === false \|\| profile\.role !== "admin"/);
