@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Glass Orders</string>
-    <string name="title_activity_main">Glass Orders</string>
+    <string name="app_name">Y.D Glass Manager</string>
+    <string name="title_activity_main">Y.D Glass Manager</string>
     <string name="package_name">com.hgad.glassorders</string>
     <string name="custom_url_scheme">com.hgad.glassorders</string>
 </resources>

@@ -1,0 +1,7 @@
+project_id = "ekzlongtkegscqxsevjl"
+
+# Login and reset requests are public entry points, so JWT verification is
+# performed inside the function for every admin action. Admin routes reject
+# callers unless their bearer token belongs to an active public.users admin.
+[functions.glass-auth]
+verify_jwt = false
