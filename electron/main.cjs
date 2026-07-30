@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, dialog, Notification } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, shell, dialog, Notification, safeStorage } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -8,6 +8,12 @@ const {
   authRecoveryUrlFromArgv,
   sanitizeAuthRecoveryUrl
 } = require("./auth-recovery-link.cjs");
+const {
+  encryptionAvailable,
+  mergeBotSettingsRecord,
+  normalizeBotSettingsRecord,
+  runtimeBotSettings
+} = require("./secure-bot-settings.cjs");
 
 let localServerProcess = null;
 const localServerLogs = [];
@@ -21,6 +27,7 @@ const telegramBotLogs = [];
 let telegramBotState = "stopped";
 let stoppingTelegramBot = false;
 let telegramRestartTimer = null;
+let telegramRestartBlocked = false;
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -36,7 +43,10 @@ const DEFAULT_BOT_SETTINGS = {
   openAtLogin: false,
   startHiddenAtLogin: true,
   supabaseUrl: "",
-  supabaseKey: ""
+  supabaseKey: "",
+  supabaseEmail: "",
+  botTokenCipher: "",
+  supabasePasswordCipher: ""
 };
 const appIconPath = path.join(root, "icons", "app-icon.png");
 const trayIconPath = path.join(root, "icons", "tray-icon.png");
@@ -149,7 +159,10 @@ function pushBotLog(line) {
   if (!text) return;
   for (const part of text.split("\n")) {
     const statusMatch = part.match(/BOT_STATUS:(starting|running|reconnecting|failed|stopped)/);
-    if (statusMatch) telegramBotState = statusMatch[1];
+    if (statusMatch) {
+      telegramBotState = statusMatch[1];
+      if (statusMatch[1] === "failed") telegramRestartBlocked = true;
+    }
     telegramBotLogs.push(`[${new Date().toLocaleTimeString()}] ${part}`);
   }
   if (telegramBotLogs.length > 500) telegramBotLogs.shift();
@@ -184,12 +197,19 @@ function writeJsonFile(filePath, payload) {
   return { ok: true, filePath };
 }
 
-function readBotSettings() {
+function readBotSettingsRecord() {
   try {
-    return normalizeBotSettings(JSON.parse(fs.readFileSync(botSettingsPath, "utf8")));
+    return normalizeBotSettingsRecord({
+      ...DEFAULT_BOT_SETTINGS,
+      ...JSON.parse(fs.readFileSync(botSettingsPath, "utf8"))
+    });
   } catch {
-    return { ...DEFAULT_BOT_SETTINGS };
+    return normalizeBotSettingsRecord(DEFAULT_BOT_SETTINGS);
   }
+}
+
+function readBotSettings() {
+  return runtimeBotSettings(readBotSettingsRecord(), safeStorage);
 }
 
 function normalizeBotSettings(settings = {}) {
@@ -199,18 +219,30 @@ function normalizeBotSettings(settings = {}) {
     openAtLogin: settings.openAtLogin === true,
     startHiddenAtLogin: settings.startHiddenAtLogin !== false,
     supabaseUrl: String(settings.supabaseUrl || ""),
-    supabaseKey: String(settings.supabaseKey || "")
+    supabaseKey: String(settings.supabaseKey || ""),
+    supabaseEmail: String(settings.supabaseEmail || "").trim().toLocaleLowerCase(),
+    botToken: String(settings.botToken || ""),
+    supabasePassword: String(settings.supabasePassword || "")
   };
 }
 
 function publicBotSettings(settings = readBotSettings()) {
   const normalized = normalizeBotSettings(settings);
+  const hasBotToken = !!(normalized.botToken || process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN);
+  const hasSupabaseAuth = !!(
+    (normalized.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL) &&
+    (normalized.supabasePassword || process.env.TELEGRAM_SUPABASE_PASSWORD)
+  );
   return {
     enabled: normalized.enabled,
     openAtLogin: normalized.openAtLogin,
     startHiddenAtLogin: normalized.startHiddenAtLogin,
     canOpenAtLogin: process.platform === "win32",
-    hasSupabase: !!(normalized.supabaseUrl && normalized.supabaseKey)
+    hasSupabase: !!(normalized.supabaseUrl && normalized.supabaseKey),
+    hasSupabaseAuth,
+    hasBotToken,
+    supabaseEmail: normalized.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL || "",
+    credentialStorageAvailable: encryptionAvailable(safeStorage)
   };
 }
 
@@ -230,9 +262,10 @@ function applyBotLoginItemSettings(settings = readBotSettings()) {
 }
 
 function saveBotSettings(patch = {}) {
-  const current = readBotSettings();
-  const next = normalizeBotSettings({ ...current, ...patch, updatedAt: new Date().toISOString() });
-  writeJsonFile(botSettingsPath, next);
+  const currentRecord = readBotSettingsRecord();
+  const nextRecord = mergeBotSettingsRecord(currentRecord, patch, safeStorage);
+  writeJsonFile(botSettingsPath, nextRecord);
+  const next = runtimeBotSettings(nextRecord, safeStorage);
   applyBotLoginItemSettings(next);
   return next;
 }
@@ -1006,12 +1039,30 @@ async function startTelegramBot(options = {}) {
     telegramRestartTimer = null;
   }
   stoppingTelegramBot = false;
+  telegramRestartBlocked = false;
   const currentSettings = readBotSettings();
   const runSettings = normalizeBotSettings({
     ...currentSettings,
-    supabaseUrl: options.supabaseUrl || currentSettings.supabaseUrl,
-    supabaseKey: options.supabaseKey || currentSettings.supabaseKey
+    supabaseUrl: options.supabaseUrl || currentSettings.supabaseUrl || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL,
+    supabaseKey: options.supabaseKey || currentSettings.supabaseKey || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY,
+    supabaseEmail: options.supabaseEmail || currentSettings.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL,
+    supabasePassword: options.supabasePassword || currentSettings.supabasePassword || process.env.TELEGRAM_SUPABASE_PASSWORD,
+    botToken: options.botToken || currentSettings.botToken || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN
   });
+  const missingConfiguration = [
+    !runSettings.botToken && "Telegram bot token",
+    !runSettings.supabaseUrl && "Supabase URL",
+    !runSettings.supabaseKey && "Supabase anon key",
+    !runSettings.supabaseEmail && "Supabase bot email",
+    !runSettings.supabasePassword && "Supabase bot password"
+  ].filter(Boolean);
+  if (missingConfiguration.length) {
+    telegramBotState = "failed";
+    telegramRestartBlocked = true;
+    pushBotLog(`Telegram bot configuration is incomplete: ${missingConfiguration.join(", ")}.`);
+    pushBotLog("BOT_STATUS:failed");
+    return botStatus();
+  }
   if (options.remember) {
     saveBotSettings({ ...runSettings, enabled: true });
   }
@@ -1052,7 +1103,10 @@ async function startTelegramBot(options = {}) {
         GLASS_ORDERS_WORKBOOK_PATH: process.env.GLASS_ORDERS_WORKBOOK_PATH || packagedWorkbookPath(),
         EXCEL_FILE: process.env.EXCEL_FILE || packagedWorkbookPath(),
         VITE_SUPABASE_URL: runSettings.supabaseUrl || process.env.VITE_SUPABASE_URL || "",
-        VITE_SUPABASE_ANON_KEY: runSettings.supabaseKey || process.env.VITE_SUPABASE_ANON_KEY || ""
+        VITE_SUPABASE_ANON_KEY: runSettings.supabaseKey || process.env.VITE_SUPABASE_ANON_KEY || "",
+        TELEGRAM_SUPABASE_EMAIL: runSettings.supabaseEmail || process.env.TELEGRAM_SUPABASE_EMAIL || "",
+        TELEGRAM_SUPABASE_PASSWORD: runSettings.supabasePassword || process.env.TELEGRAM_SUPABASE_PASSWORD || "",
+        TELEGRAM_BOT_TOKEN: runSettings.botToken || process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || ""
       }
     }), "Telegram bot");
   } catch (error) {
@@ -1071,9 +1125,10 @@ async function startTelegramBot(options = {}) {
   telegramBotProcess.on("exit", (code) => {
     pushBotLog(`Telegram bot stopped with code ${code}`);
     telegramBotProcess = null;
-    telegramBotState = stoppingTelegramBot ? "stopped" : "reconnecting";
+    const startupFailed = telegramRestartBlocked || telegramBotState === "failed" || code === 2;
+    telegramBotState = stoppingTelegramBot ? "stopped" : startupFailed ? "failed" : "reconnecting";
     const settings = readBotSettings();
-    if (!stoppingTelegramBot && settings.enabled) {
+    if (!stoppingTelegramBot && !startupFailed && settings.enabled) {
       const delay = 8000 + Math.floor(Math.random() * 4000);
       pushBotLog(`Restarting Telegram bot helper in ${Math.round(delay / 1000)}s...`);
       telegramRestartTimer = setTimeout(() => {
@@ -1090,6 +1145,7 @@ async function startTelegramBot(options = {}) {
 
 async function stopTelegramBot(options = {}) {
   stoppingTelegramBot = true;
+  telegramRestartBlocked = false;
   if (telegramRestartTimer) {
     clearTimeout(telegramRestartTimer);
     telegramRestartTimer = null;

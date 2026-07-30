@@ -53,6 +53,7 @@ test("Orders Status preview uses an isolated toolbar and width-safe report grid"
 test("compact desktop entry layout is scoped away from full desktop and mobile", () => {
   assert.match(appSource, /className="panel entry-order-panel"/);
   assert.match(appSource, /"stack",\s*"entry-screen"/);
+  assert.match(styleSource, /\.stack\.entry-screen\s*\{[\s\S]*grid-auto-rows:\s*max-content/);
   assert.match(styleSource, /@media \(min-width: 820px\) and \(max-width: 1050px\)\s*\{[\s\S]*\.workspace > \.entry-screen > \.entry-order-panel/);
   assert.match(styleSource, /\.entry-order-panel \.form-grid\s*\{[\s\S]*repeat\(4,\s*minmax\(0,\s*1fr\)\)/);
   assert.match(styleSource, /\.table-panel:not\(\.fullscreen-table\) > \.panel-head > \.actions\s*\{[\s\S]*repeat\(5,\s*minmax\(0,\s*1fr\)\)/);

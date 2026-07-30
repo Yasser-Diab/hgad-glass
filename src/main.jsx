@@ -212,7 +212,11 @@ const DEFAULT_PUBLIC_BOT_SETTINGS = {
   openAtLogin: false,
   startHiddenAtLogin: true,
   canOpenAtLogin: false,
-  hasSupabase: false
+  hasSupabase: false,
+  hasSupabaseAuth: false,
+  hasBotToken: false,
+  supabaseEmail: "",
+  credentialStorageAvailable: false
 };
 const COMPANY = {
   nameEn: "EL HANDASIA GROUP FOR ARCHITECTURAL DESIGNS",
@@ -3020,7 +3024,11 @@ function normalizePublicBotSettings(settings = {}) {
     openAtLogin: settings.openAtLogin === true,
     startHiddenAtLogin: settings.startHiddenAtLogin !== false,
     canOpenAtLogin: settings.canOpenAtLogin === true,
-    hasSupabase: settings.hasSupabase === true
+    hasSupabase: settings.hasSupabase === true,
+    hasSupabaseAuth: settings.hasSupabaseAuth === true,
+    hasBotToken: settings.hasBotToken === true,
+    supabaseEmail: cleanName(settings.supabaseEmail).toLocaleLowerCase(),
+    credentialStorageAvailable: settings.credentialStorageAvailable === true
   };
 }
 
@@ -3091,7 +3099,7 @@ function getSupabaseClient() {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: !window.glassOrdersDesktop,
         storageKey: supabaseAuthStorageKey(url)
       }
     })
@@ -3746,7 +3754,7 @@ async function invokeGlassAuth(action, payload = {}) {
 }
 
 async function restoreSupabaseSessionUser() {
-  if (!hasSupabaseConfig() || localServerEnabled()) return null;
+  if (!hasSupabaseConfig()) return null;
   const client = getSupabaseClient();
   if (!client) return null;
   try {
@@ -3772,7 +3780,7 @@ async function restoreSupabaseSessionUser() {
 
 async function loginUser(username, password, email = "") {
   const cleanUsername = cleanName(username);
-  const useSupabaseAuth = hasSupabaseConfig() && !localServerEnabled();
+  const useSupabaseAuth = hasSupabaseConfig();
   if (useSupabaseAuth) {
     const identity = cleanUsername || cleanName(email).toLocaleLowerCase();
     if (!identity || !password) throw new Error("اكتب اسم المستخدم وكلمة المرور.");
@@ -3835,36 +3843,7 @@ async function loginUser(username, password, email = "") {
     }
   }
 
-  if (!cleanUsername || !password) throw new Error("اكتب اسم المستخدم وكلمة المرور.");
-  if (localServerEnabled()) {
-    await ensureDesktopLocalServer(9000);
-    const data = await localRequest("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ username: cleanUsername, password })
-    });
-    if (!data?.token || !data?.user) throw new Error("لم يُنشئ الخادم المحلي جلسة صالحة.");
-    sanitizeLocalCostCachesForUser(data.user);
-    sessionStorage.setItem(LOCAL_SESSION_TOKEN_KEY, data.token);
-    localStorage.setItem("glassOrdersUser", JSON.stringify(data.user));
-    return data.user;
-  }
-  throw new Error("يلزم تفعيل Supabase أو استخدام نسخة سطح المكتب مع إعداد المسؤول الأول.");
-}
-
-async function setupLocalAdmin(username, email, password) {
-  const cleanUsername = cleanName(username);
-  if (!localServerEnabled()) throw new Error("إعداد المسؤول المحلي متاح في نسخة سطح المكتب فقط.");
-  if (!cleanUsername || !password) throw new Error("اكتب اسم دخول المسؤول وكلمة مرور قوية.");
-  await ensureDesktopLocalServer(9000);
-  return localRequest("/api/auth/setup", {
-    method: "POST",
-    body: JSON.stringify({
-      username: cleanUsername,
-      email: cleanName(email).toLocaleLowerCase(),
-      display_name: cleanUsername,
-      password
-    })
-  });
+  throw new Error("إعداد Supabase مطلوب لتسجيل الدخول إلى التطبيق.");
 }
 
 async function sendSupabasePasswordReset(username, email) {
@@ -5148,19 +5127,6 @@ function App() {
     }
   }
 
-  async function handleSetupLocalAdmin(credentials) {
-    setLoading(true);
-    setMessage("");
-    try {
-      await setupLocalAdmin(credentials.username, credentials.email, credentials.password);
-      setMessage("تم إنشاء المسؤول الأول محلياً. يمكنك تسجيل الدخول الآن.");
-    } catch (error) {
-      setMessage(`تعذر إعداد المسؤول الأول: ${safeErrorMessage(error)}`);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function handleResetSupabasePassword(credentials) {
     setLoading(true);
     setMessage("");
@@ -5857,10 +5823,8 @@ function App() {
         )}
         <LoginView
           onLogin={handleLogin}
-          onSetupLocalAdmin={handleSetupLocalAdmin}
           onResetPassword={handleResetSupabasePassword}
-          supabaseMode={hasSupabaseConfig() && !localServerEnabled()}
-          localSetupMode={localServerEnabled()}
+          supabaseMode={hasSupabaseConfig()}
           message={message}
           onClearMessage={() => setMessage("")}
           busy={loading}
@@ -6326,7 +6290,7 @@ function LoadingLayer({
   );
 }
 
-function LoginView({ onLogin, onSetupLocalAdmin, onResetPassword, supabaseMode, localSetupMode = false, message, onClearMessage, busy, logoSrc, version = VERSION }) {
+function LoginView({ onLogin, onResetPassword, supabaseMode, message, onClearMessage, busy, logoSrc, version = VERSION }) {
   const [username, setUsername] = useState(() => (
     localStorage.getItem("glassOrdersLastUsername")
     || localStorage.getItem("glassOrdersLastEmail")
@@ -6340,10 +6304,6 @@ function LoginView({ onLogin, onSetupLocalAdmin, onResetPassword, supabaseMode, 
     if (username.includes("@")) localStorage.setItem("glassOrdersLastEmail", username);
     else if (email) localStorage.setItem("glassOrdersLastEmail", email);
     await onLogin({ username, email, password });
-  }
-  async function setupFirstLocalAdmin() {
-    if (username) localStorage.setItem("glassOrdersLastUsername", username);
-    await onSetupLocalAdmin?.({ username, email, password });
   }
   async function resetPassword() {
     localStorage.setItem("glassOrdersLastUsername", username);
@@ -6384,19 +6344,14 @@ function LoginView({ onLogin, onSetupLocalAdmin, onResetPassword, supabaseMode, 
               <button type="button" onClick={resetPassword} disabled={busy || !username}><KeyRound size={16} />إعادة تعيين كلمة المرور</button>
             </div>
           )}
-          {localSetupMode && (
-            <div className="login-secondary-actions">
-              <button type="button" onClick={setupFirstLocalAdmin} disabled={busy || !username || password.length < 10}><UserPlus size={16} />إعداد المسؤول الأول</button>
-            </div>
-          )}
         </form>
         <footer className="login-product-footer">
           <span dir="ltr">{PRODUCT_LINE}</span>
           <small dir="ltr">Version {version}</small>
         </footer>
         <div className="login-help">
-          <span>{supabaseMode ? "تسجيل الدخول محمي بواسطة Supabase Auth" : localSetupMode ? "قاعدة محلية مشفرة داخل نسخة سطح المكتب" : "فعّل Supabase من الإعدادات للمتابعة"}</span>
-          {localSetupMode && <span>استخدم إعداد المسؤول الأول مرة واحدة فقط عند قاعدة بيانات جديدة.</span>}
+          <span>{supabaseMode ? "تسجيل الدخول مباشر ومحمي بواسطة Supabase Auth" : "إعداد Supabase غير مكتمل في هذا الإصدار."}</span>
+          {window.glassOrdersDesktop && <span>لا يحتاج تسجيل الدخول إلى تشغيل خادم المتصفح المحلي.</span>}
         </div>
         {message && <Notice message={message} onClose={onClearMessage} />}
       </section>
@@ -8006,7 +7961,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
         </div>
       </section>}
       <section className={tableFullScreen || drawingFocusIndex >= 0 ? "panel table-panel fullscreen-table" : "panel table-panel"}>
-        <div className="panel-head">
+        <div className="panel-head entry-table-toolbar">
           <div>
             <h2>جدول الادخال</h2>
             {drawingFocusIndex < 0 && <p>إعدادات الوحدة والاتجاه تطبق على البيانات الملصقة فقط.</p>}
@@ -8430,7 +8385,16 @@ function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptio
   return (
     <div className={[invalid ? "invalid-row" : "", selectedRow ? "row-selected" : "", "table-entry"].filter(Boolean).join(" ")} style={{ "--entry-row-height": `${rowHeight}px` }} onKeyDown={handleEnter} onContextMenu={onRowContextMenu}>
       <div className="table-row">
-        <button type="button" className="row-index-cell row-select-button" title="تحديد الصف" onPointerDown={onRowSelect}>{index + 1}</button>
+        <button
+          type="button"
+          className="row-index-cell row-select-button"
+          title={`تحديد الصف ${index + 1}`}
+          aria-label={`تحديد الصف ${index + 1}`}
+          aria-pressed={selectedRow}
+          onPointerDown={onRowSelect}
+        >
+          <span aria-hidden="true">{index + 1}</span>
+        </button>
         <div className="description" dir="auto">{rowDescription(row)}</div>
         <FillDownCell column="mode" onCopyDown={onCopyDownCell}>
           <select {...tableCellProps("mode")} value={row.glassMode} onChange={(e) => setMode(e.target.value)}>
@@ -12602,6 +12566,11 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
   const [botLogs, setBotLogs] = useState([]);
   const [botStatus, setBotStatus] = useState({ running: false });
   const [botSettings, setBotSettings] = useState(() => readBrowserBotSettings());
+  const [botCredentialForm, setBotCredentialForm] = useState(() => ({
+    supabaseEmail: readBrowserBotSettings().supabaseEmail || "",
+    supabasePassword: "",
+    botToken: ""
+  }));
   const [botLogExpanded, setBotLogExpanded] = useState(false);
   const [reportSaveSettings, setReportSaveSettings] = useState(readReportSaveSettings);
   const [busy, setBusy] = useState(false);
@@ -12631,7 +12600,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
 
   async function refreshUsers() {
     try {
-      const client = supabaseEnabled() ? getSupabaseClient() : null;
+      const client = hasSupabaseConfig() ? getSupabaseClient() : null;
       if (client) {
         const result = await client.from("users").select(USER_PUBLIC_COLUMNS).order("created_at").order("username");
         if (result.error) throw result.error;
@@ -12657,7 +12626,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
 
   async function readServerLogs() {
     if (!window.glassOrdersDesktop?.localServerLogs) {
-      setServerLogs(["الخادم المحلي يعمل تلقائياً في نسخة سطح المكتب. السجل التفصيلي يظهر هنا عند فتح البرنامج من Windows app."]);
+      setServerLogs(["قاعدة البيانات المحلية اختيارية ومتوقفة ما لم يشغّلها المدير من تطبيق Windows. تسجيل الدخول يعمل مباشرة عبر Supabase ولا يعتمد عليها."]);
       return;
     }
     try {
@@ -12770,24 +12739,34 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     return result;
   }
 
+  function applyTelegramBotSettings(settings) {
+    const normalized = normalizePublicBotSettings(settings);
+    setBotSettings(normalized);
+    setBotCredentialForm((current) => ({
+      ...current,
+      supabaseEmail: current.supabaseEmail || normalized.supabaseEmail || ""
+    }));
+    return normalized;
+  }
+
   function applyTelegramBotStatus(status) {
     const safeStatus = status || { running: false };
     setBotStatus(safeStatus);
     setBotLogs(safeStatus.logs || []);
     if (safeStatus.settings) {
-      setBotSettings(normalizePublicBotSettings(safeStatus.settings));
+      applyTelegramBotSettings(safeStatus.settings);
     }
   }
 
   async function readTelegramBotSettings() {
     if (!window.glassOrdersDesktop?.telegramBotSettings) {
-      setBotSettings(readBrowserBotSettings());
+      applyTelegramBotSettings(readBrowserBotSettings());
       return;
     }
     try {
-      setBotSettings(normalizePublicBotSettings(await window.glassOrdersDesktop.telegramBotSettings()));
+      applyTelegramBotSettings(await window.glassOrdersDesktop.telegramBotSettings());
     } catch {
-      setBotSettings(readBrowserBotSettings());
+      applyTelegramBotSettings(readBrowserBotSettings());
     }
   }
 
@@ -12804,7 +12783,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
       applyTelegramBotStatus(await localRequest("/api/telegram-bot/status", {}, 2500));
     } catch {
       applyTelegramBotStatus({ running: false });
-      setBotLogs(["اضغط حفظ وتشغيل لتجهيز القاعدة المحلية أولاً، ثم شغل البوت من هنا."]);
+      setBotLogs(["تشغيل البوت من المتصفح يحتاج خادم المساعدة الاختياري. استخدم تطبيق Windows لإعداد بيانات البوت وتشغيله مباشرة."]);
     }
   }
 
@@ -12818,8 +12797,95 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     const saved = supabaseConfig();
     return {
       supabaseUrl: (supabaseForm.url || saved.url || "").trim(),
-      supabaseKey: (supabaseForm.key || saved.key || "").trim()
+      supabaseKey: (supabaseForm.key || saved.key || "").trim(),
+      supabaseEmail: cleanName(botCredentialForm.supabaseEmail || botSettings.supabaseEmail).toLocaleLowerCase(),
+      supabasePassword: String(botCredentialForm.supabasePassword || ""),
+      botToken: String(botCredentialForm.botToken || "")
     };
+  }
+
+  function missingBotConfiguration(credentials = botSupabaseCredentials()) {
+    const sameStoredEmail = cleanName(credentials.supabaseEmail).toLocaleLowerCase() === cleanName(botSettings.supabaseEmail).toLocaleLowerCase();
+    return [
+      !credentials.supabaseUrl && "رابط Supabase",
+      !credentials.supabaseKey && "مفتاح Supabase العام",
+      !credentials.supabaseEmail && "بريد حساب البوت",
+      !(credentials.supabasePassword || (sameStoredEmail && botSettings.hasSupabaseAuth)) && "كلمة مرور حساب البوت",
+      !(credentials.botToken || botSettings.hasBotToken) && "Telegram Bot Token"
+    ].filter(Boolean);
+  }
+
+  function botSettingsPatch(credentials, patch = {}) {
+    const settingsPatch = {
+      ...patch,
+      supabaseUrl: credentials.supabaseUrl,
+      supabaseKey: credentials.supabaseKey,
+      supabaseEmail: credentials.supabaseEmail
+    };
+    if (credentials.supabasePassword) settingsPatch.supabasePassword = credentials.supabasePassword;
+    if (credentials.botToken) settingsPatch.botToken = credentials.botToken;
+    return settingsPatch;
+  }
+
+  async function saveTelegramBotCredentials() {
+    if (!requireAdminBotControl()) return;
+    if (!window.glassOrdersDesktop?.updateTelegramBotSettings) {
+      setMessage("حفظ بيانات اعتماد البوت متاح من تطبيق Windows فقط.");
+      return;
+    }
+    if (!botSettings.credentialStorageAvailable) {
+      setMessage("تعذر الوصول إلى مخزن بيانات الاعتماد المشفّر في Windows.");
+      return;
+    }
+    const credentials = botSupabaseCredentials();
+    const missing = missingBotConfiguration(credentials);
+    if (missing.length) {
+      setMessage(`أكمل إعداد البوت: ${missing.join("، ")}.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const settings = await window.glassOrdersDesktop.updateTelegramBotSettings(botSettingsPatch(credentials));
+      applyTelegramBotSettings(settings);
+      setBotCredentialForm((current) => ({ ...current, supabasePassword: "", botToken: "" }));
+      setMessage("تم حفظ بيانات بوت Telegram بأمان. كلمات المرور والرمز لا تُعرض مرة أخرى.");
+    } catch (error) {
+      setMessage(`تعذر حفظ بيانات البوت: ${safeErrorMessage(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function clearTelegramBotCredentials() {
+    if (!requireAdminBotControl()) return;
+    const confirmed = window.confirm("حذف بيانات اعتماد بوت Telegram المحفوظة وإيقاف تشغيله التلقائي؟");
+    restoreRendererInputFocus();
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      if (window.glassOrdersDesktop?.stopTelegramBot) {
+        await window.glassOrdersDesktop.stopTelegramBot({ remember: true });
+      }
+      const patch = {
+        enabled: false,
+        openAtLogin: false,
+        supabaseEmail: "",
+        supabasePassword: "",
+        botToken: ""
+      };
+      const settings = window.glassOrdersDesktop?.updateTelegramBotSettings
+        ? await window.glassOrdersDesktop.updateTelegramBotSettings(patch)
+        : saveBrowserBotSettings({ ...patch, hasSupabaseAuth: false, hasBotToken: false });
+      applyTelegramBotSettings(settings);
+      setBotCredentialForm({ supabaseEmail: "", supabasePassword: "", botToken: "" });
+      applyTelegramBotStatus({ running: false, state: "stopped", logs: [], settings });
+      setMessage("تم حذف بيانات اعتماد البوت وإيقاف تشغيله التلقائي.");
+    } catch (error) {
+      setMessage(`تعذر حذف بيانات اعتماد البوت: ${safeErrorMessage(error)}`);
+    } finally {
+      setBusy(false);
+      restoreRendererInputFocus();
+    }
   }
 
   async function saveBotStartupSettings(patch = {}) {
@@ -12831,23 +12897,29 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
       nextPatch.startHiddenAtLogin = true;
     }
     if (nextPatch.enabled === false) nextPatch.openAtLogin = false;
-    if ((nextPatch.enabled || nextPatch.openAtLogin) && (!credentials.supabaseUrl || !credentials.supabaseKey)) {
-      setMessage("احفظ إعدادات Supabase أولاً قبل تفعيل تشغيل البوت تلقائياً.");
+    const missing = missingBotConfiguration(credentials);
+    if ((nextPatch.enabled || nextPatch.openAtLogin) && missing.length) {
+      setMessage(`لا يمكن تفعيل التشغيل التلقائي قبل إكمال: ${missing.join("، ")}.`);
       return;
     }
     setBusy(true);
     try {
       let settings;
-      const settingsPatch = { ...nextPatch };
-      if (credentials.supabaseUrl && credentials.supabaseKey) Object.assign(settingsPatch, credentials);
+      const settingsPatch = botSettingsPatch(credentials, nextPatch);
       if (window.glassOrdersDesktop?.updateTelegramBotSettings) {
         settings = await window.glassOrdersDesktop.updateTelegramBotSettings(settingsPatch);
       } else {
-        settings = saveBrowserBotSettings({ ...nextPatch, hasSupabase: !!(credentials.supabaseUrl && credentials.supabaseKey) });
+        settings = saveBrowserBotSettings({
+          ...nextPatch,
+          hasSupabase: !!(credentials.supabaseUrl && credentials.supabaseKey),
+          hasSupabaseAuth: !missingBotConfiguration(credentials).some((item) => item.includes("حساب البوت")),
+          hasBotToken: !!(credentials.botToken || botSettings.hasBotToken),
+          supabaseEmail: credentials.supabaseEmail
+        });
       }
-      const normalized = normalizePublicBotSettings(settings);
-      setBotSettings(normalized);
+      const normalized = applyTelegramBotSettings(settings);
       setBotStatus((current) => ({ ...current, settings: normalized }));
+      setBotCredentialForm((current) => ({ ...current, supabasePassword: "", botToken: "" }));
       setMessage("تم حفظ إعدادات تشغيل بوت Telegram.");
     } catch (error) {
       setMessage(`تعذر حفظ إعدادات البوت: ${safeErrorMessage(error)}`);
@@ -12859,23 +12931,30 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
   async function startTelegramBotFromSettings() {
     if (!requireAdminBotControl()) return;
     const credentials = botSupabaseCredentials();
-    if (!credentials.supabaseUrl || !credentials.supabaseKey) {
-      setMessage("احفظ إعدادات Supabase أولاً قبل تشغيل بوت Telegram.");
+    const missing = missingBotConfiguration(credentials);
+    if (missing.length) {
+      setMessage(`لا يمكن تشغيل البوت قبل إكمال: ${missing.join("، ")}.`);
       return;
     }
     setBusy(true);
     try {
       let result;
       if (window.glassOrdersDesktop?.startTelegramBot) {
-        result = await window.glassOrdersDesktop.startTelegramBot({ ...credentials, remember: true });
+        result = await window.glassOrdersDesktop.startTelegramBot({ ...botSettingsPatch(credentials), remember: true });
       } else {
         try {
           result = await localRequest("/api/telegram-bot/start", {
             method: "POST",
-            body: JSON.stringify(credentials)
+            body: JSON.stringify(botSettingsPatch(credentials))
           }, 8000);
-          const settings = saveBrowserBotSettings({ enabled: true, hasSupabase: true });
-          setBotSettings(settings);
+          const settings = saveBrowserBotSettings({
+            enabled: true,
+            hasSupabase: true,
+            hasSupabaseAuth: true,
+            hasBotToken: true,
+            supabaseEmail: credentials.supabaseEmail
+          });
+          applyTelegramBotSettings(settings);
         } catch (error) {
           if (/failed to fetch|network|refused/i.test(safeErrorMessage(error))) {
             throw new Error("الخادم المحلي غير يعمل الآن. افتح نسخة سطح المكتب أو اضغط حفظ وتشغيل في القاعدة المحلية أولاً.");
@@ -12884,6 +12963,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
         }
       }
       applyTelegramBotStatus(result || { running: true, settings: { ...botSettings, enabled: true, hasSupabase: true } });
+      setBotCredentialForm((current) => ({ ...current, supabasePassword: "", botToken: "" }));
       setMessage("تم تشغيل بوت Telegram وتذكر الاختيار.");
     } catch (error) {
       setMessage(`تعذر تشغيل بوت Telegram: ${safeErrorMessage(error)}`);
@@ -12976,7 +13056,11 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
   function saveSupabaseSettings() {
     localStorage.setItem("glassOrdersSupabaseUrl", supabaseForm.url.trim());
     localStorage.setItem("glassOrdersSupabaseKey", supabaseForm.key.trim());
-    localStorage.setItem("glassOrdersSupabaseRedirectUrl", supabaseForm.redirectUrl.trim());
+    if (window.glassOrdersDesktop?.authRecoveryRedirectUrl === DESKTOP_AUTH_RECOVERY_REDIRECT_URL) {
+      localStorage.removeItem("glassOrdersSupabaseRedirectUrl");
+    } else {
+      localStorage.setItem("glassOrdersSupabaseRedirectUrl", supabaseForm.redirectUrl.trim());
+    }
     resetSupabaseClientCache();
     setDataSourceMode("supabase");
     setSourceMode("supabase");
@@ -13011,7 +13095,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     setBusy(true);
     try {
       let user;
-      const client = supabaseEnabled() ? getSupabaseClient() : null;
+      const client = hasSupabaseConfig() ? getSupabaseClient() : null;
       if (client) {
         const payload = {
           username: cleanName(newUser.username),
@@ -13048,7 +13132,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     setBusy(true);
     try {
       let updated;
-      const client = supabaseEnabled() ? getSupabaseClient() : null;
+      const client = hasSupabaseConfig() ? getSupabaseClient() : null;
       if (client) {
         const patch = { ...editingUser };
         if (patch.username !== undefined) patch.username = cleanName(patch.username);
@@ -13090,7 +13174,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     if (!confirmed) return;
     setBusy(true);
     try {
-      const client = supabaseEnabled() ? getSupabaseClient() : null;
+      const client = hasSupabaseConfig() ? getSupabaseClient() : null;
       if (client) {
         const result = await client.from("users").update({ is_active: false }).eq("id", userId);
         if (result.error) throw result.error;
@@ -13123,7 +13207,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     if (!confirmed) return;
     setBusy(true);
     try {
-      const client = supabaseEnabled() ? getSupabaseClient() : null;
+      const client = hasSupabaseConfig() ? getSupabaseClient() : null;
       if (client) {
         const result = await client.from("users").delete().eq("id", user.id);
         if (result.error) throw result.error;
@@ -13146,7 +13230,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     if (!currentUser?.id) return;
     setBusy(true);
     try {
-      const client = supabaseEnabled() ? getSupabaseClient() : null;
+      const client = hasSupabaseConfig() ? getSupabaseClient() : null;
       if (client) {
         await changeSupabaseAppUserPassword(currentUser, passwordDraft.current_password, passwordDraft.new_password);
         await refreshUsers();
@@ -13207,17 +13291,16 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
         <div className="about-product-mark">
           <BrandMark small logoSrc={appLogoSrc} />
           <div>
-            <span dir="ltr">{APP_NAME}</span>
-             <h2 dir="ltr">{FULL_APP_NAME}</h2>
-             <p>{SUB_NAME}</p>
-             <small dir="ltr">{ENGLISH_SUB_NAME}</small>
+            <h2 dir="ltr">{BRAND_NAME}</h2>
+            <p>{SUB_NAME}</p>
+            <small dir="ltr">{ENGLISH_SUB_NAME}</small>
           </div>
         </div>
         <div className="about-product-grid">
           <div><span>الإصدار</span><strong dir="ltr">Version {appVersion}</strong></div>
           <div><span>المنتج</span><strong dir="ltr">{PRODUCT_LINE}</strong></div>
-          <div><span>الوصول المحلي</span><strong dir="ltr">127.0.0.1:5174</strong></div>
-          <div><span>الخلفية السحابية</span><strong>{data.source === "supabase" ? "متصل" : "حسب إعداد مصدر البيانات"}</strong></div>
+          <div><span>تسجيل الدخول</span><strong>Supabase Auth مباشر</strong></div>
+          <div><span>الوصول بالمتصفح</span><strong>اختياري من الإعدادات</strong></div>
         </div>
         <small dir="ltr">Developed by {DEVELOPER_NAME}</small>
       </section>
@@ -13392,7 +13475,12 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
       </section>
 
       {isAdmin && <section className="panel">
-        <div className="panel-head"><h2>القاعدة المحلية</h2></div>
+        <div className="panel-head">
+          <div>
+            <h2>مصدر بيانات الطلبات المحلي</h2>
+            <p>اختياري للبيانات فقط. تسجيل الدخول وإدارة المستخدمين يعملان مباشرة عبر Supabase دائماً.</p>
+          </div>
+        </div>
         <div className="settings-grid">
           <Field label="مصدر البيانات">
             <select value={sourceMode} onChange={(event) => {
@@ -13402,8 +13490,8 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
               setDataSourceMode(mode);
             }}>
               <option value="supabase">Supabase مباشر</option>
-              <option value="local" disabled={!localServerAllowed()}>قاعدة محلية داخل التطبيق</option>
-              <option value="browser">تجربة داخل المتصفح فقط</option>
+              <option value="local" disabled={!localServerAllowed()}>بيانات محلية داخل التطبيق</option>
+              <option value="browser">بيانات المتصفح المحلية</option>
             </select>
           </Field>
           <Field label="رابط الخادم المحلي">
@@ -13460,6 +13548,60 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
           </div>
           {isAdmin ? (
             <>
+              <div className="telegram-credentials-card">
+                <div className="telegram-credential-status">
+                  <span className={botSettings.hasBotToken ? "status-chip success" : "status-chip danger"}>
+                    {botSettings.hasBotToken ? "رمز Telegram محفوظ" : "رمز Telegram مطلوب"}
+                  </span>
+                  <span className={botSettings.hasSupabaseAuth ? "status-chip success" : "status-chip danger"}>
+                    {botSettings.hasSupabaseAuth ? "حساب Supabase محفوظ" : "حساب Supabase مطلوب"}
+                  </span>
+                  <span className={botSettings.credentialStorageAvailable ? "status-chip success" : "status-chip warning"}>
+                    {botSettings.credentialStorageAvailable ? "تخزين Windows المشفّر متاح" : "التخزين المشفّر متاح في تطبيق Windows فقط"}
+                  </span>
+                </div>
+                <div className="telegram-credentials-grid">
+                  <Field label="Telegram Bot Token">
+                    <input
+                      type="password"
+                      dir="ltr"
+                      value={botCredentialForm.botToken}
+                      onChange={(event) => setBotCredentialForm((current) => ({ ...current, botToken: event.target.value }))}
+                      autoComplete="new-password"
+                      placeholder={botSettings.hasBotToken ? "محفوظ — اتركه فارغاً دون تغيير" : "123456:ABC..."}
+                    />
+                  </Field>
+                  <Field label="بريد حساب البوت في Supabase">
+                    <input
+                      type="email"
+                      dir="ltr"
+                      value={botCredentialForm.supabaseEmail}
+                      onChange={(event) => setBotCredentialForm((current) => ({ ...current, supabaseEmail: event.target.value }))}
+                      autoComplete="off"
+                      placeholder="bot@example.com"
+                    />
+                  </Field>
+                  <Field label="كلمة مرور حساب البوت في Supabase">
+                    <input
+                      type="password"
+                      dir="ltr"
+                      value={botCredentialForm.supabasePassword}
+                      onChange={(event) => setBotCredentialForm((current) => ({ ...current, supabasePassword: event.target.value }))}
+                      autoComplete="new-password"
+                      placeholder={botSettings.hasSupabaseAuth ? "محفوظة — اتركها فارغة دون تغيير" : "كلمة مرور حساب البوت"}
+                    />
+                  </Field>
+                </div>
+                <div className="actions">
+                  <button className="primary" type="button" onClick={saveTelegramBotCredentials} disabled={busy || !window.glassOrdersDesktop?.updateTelegramBotSettings || !botSettings.credentialStorageAvailable}>
+                    <Save size={18} />حفظ بيانات البوت
+                  </button>
+                  <button className="danger" type="button" onClick={clearTelegramBotCredentials} disabled={busy || (!botSettings.hasBotToken && !botSettings.hasSupabaseAuth)}>
+                    <Trash2 size={18} />حذف البيانات المحفوظة
+                  </button>
+                </div>
+                <p className="hint">يحفظ تطبيق Windows الرمز وكلمة المرور مشفّرين بواسطة حساب Windows الحالي، ولا يعيدهما إلى الواجهة أو يكتبهما في ملفات الإصدار.</p>
+              </div>
               <label className="toggle-line">
                 <input
                   type="checkbox"
@@ -13501,8 +13643,16 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
           <Field label="Anon key">
             <input type="password" dir="ltr" value={supabaseForm.key} onChange={(event) => setSupabaseForm((current) => ({ ...current, key: event.target.value }))} autoComplete="off" placeholder="eyJ..." />
           </Field>
-          <Field label="رابط الرجوع للبريد">
-            <input type="password" dir="ltr" value={supabaseForm.redirectUrl} onChange={(event) => setSupabaseForm((current) => ({ ...current, redirectUrl: event.target.value }))} autoComplete="off" placeholder="اختياري" />
+          <Field label="رابط استعادة كلمة المرور">
+            <input
+              type="text"
+              dir="ltr"
+              value={window.glassOrdersDesktop?.authRecoveryRedirectUrl === DESKTOP_AUTH_RECOVERY_REDIRECT_URL ? DESKTOP_AUTH_RECOVERY_REDIRECT_URL : supabaseForm.redirectUrl}
+              readOnly={window.glassOrdersDesktop?.authRecoveryRedirectUrl === DESKTOP_AUTH_RECOVERY_REDIRECT_URL}
+              onChange={(event) => setSupabaseForm((current) => ({ ...current, redirectUrl: event.target.value }))}
+              autoComplete="off"
+              placeholder="اختياري في المتصفح"
+            />
           </Field>
           <div className="actions">
             <button onClick={saveSupabaseSettings}><Save size={18} />حفظ وتفعيل Supabase</button>
@@ -13533,7 +13683,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
                 <input value={newUser.username} onChange={(event) => setNewUser({ ...newUser, username: event.target.value })} required />
               </Field>
               <Field label="البريد الإلكتروني">
-                <input type="email" dir="ltr" value={newUser.email} onChange={(event) => setNewUser({ ...newUser, email: event.target.value })} required={supabaseEnabled()} />
+                <input type="email" dir="ltr" value={newUser.email} onChange={(event) => setNewUser({ ...newUser, email: event.target.value })} required={hasSupabaseConfig()} />
               </Field>
               <Field label="الاسم في التقارير">
                 <input value={newUser.display_name} onChange={(event) => setNewUser({ ...newUser, display_name: event.target.value })} placeholder="John Doe" required />
@@ -13602,8 +13752,8 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
                               minLength={10}
                               value={editingUser.password || ""}
                               onChange={(event) => setEditingUser({ ...editingUser, password: event.target.value })}
-                              required={supabaseEnabled() && !user.auth_user_id}
-                              placeholder={supabaseEnabled() && !user.auth_user_id ? "مطلوبة لربط الحساب" : "اتركها فارغة دون تغيير"}
+                              required={hasSupabaseConfig() && !user.auth_user_id}
+                              placeholder={hasSupabaseConfig() && !user.auth_user_id ? "مطلوبة لربط الحساب" : "اتركها فارغة دون تغيير"}
                             />
                           </td>
                           <td dir="ltr">{user.last_login_at || ""}</td>
@@ -13620,7 +13770,7 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
                           <td>{user.role === "admin" ? "مدير" : "مستخدم"}</td>
                           <td>{canCurrentUserViewCosts(user) ? "نعم" : "لا"}</td>
                           <td>{user.is_active === false ? "موقوف" : "نشط"}</td>
-                          <td>{supabaseEnabled()
+                           <td>{hasSupabaseConfig()
                             ? user.auth_user_id
                               ? "مرتبط بـ Supabase Auth"
                               : "غير مرتبط — أدخل كلمة مرور ثم احفظ"
@@ -14107,7 +14257,7 @@ function reportPrintCss() {
       width: 100%;
       max-width: 100%;
       min-width: 0;
-      border: 1.2px solid var(--report-border);
+      border: 1px solid var(--report-border);
       border-radius: 6px;
       overflow: hidden;
       background: var(--report-row-background);
@@ -14353,12 +14503,10 @@ function reportPrintCss() {
     .supplier-statement-edit,
     [data-report-edit-order] { display: none !important; }
     .description-header,
-    .description-cell {
-      border-left: 1px solid var(--report-border) !important;
-    }
+    .description-cell,
     .code-header,
     .code-cell {
-      border-right: 1px solid var(--report-border) !important;
+      border-color: var(--report-border);
     }
     .report-description {
       justify-content: flex-start;
@@ -14874,7 +15022,7 @@ function preparePdfClone(clonedDocument, clonedElement) {
       width: 100% !important;
       max-width: 100% !important;
       min-width: 0 !important;
-      border: 1.2px solid var(--report-border) !important;
+      border: 1px solid var(--report-border) !important;
     }
     .pdf-export-root .order-report-row,
     .pdf-host .order-report-row {
@@ -14902,15 +15050,13 @@ function preparePdfClone(clonedDocument, clonedElement) {
     }
     .pdf-export-root .description-header,
     .pdf-export-root .description-cell,
-    .pdf-host .description-header,
-    .pdf-host .description-cell {
-      border-left: 1px solid var(--report-border) !important;
-    }
     .pdf-export-root .code-header,
     .pdf-export-root .code-cell,
+    .pdf-host .description-header,
+    .pdf-host .description-cell,
     .pdf-host .code-header,
     .pdf-host .code-cell {
-      border-right: 1px solid var(--report-border) !important;
+      border-color: var(--report-border) !important;
     }
   `;
   clonedDocument.head.appendChild(style);
@@ -16335,18 +16481,6 @@ function StatusVariantApp() {
     }
   }
 
-  async function handleSetupLocalAdmin(credentials) {
-    setLoading(true);
-    try {
-      await setupLocalAdmin(credentials.username, credentials.email, credentials.password);
-      setMessage("تم إنشاء المسؤول الأول محلياً. يمكنك تسجيل الدخول الآن.");
-    } catch (error) {
-      setMessage(`تعذر إعداد المسؤول الأول: ${safeErrorMessage(error)}`);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function handleResetSupabasePassword(credentials) {
     setLoading(true);
     try {
@@ -16464,10 +16598,8 @@ function StatusVariantApp() {
         {loading && <LoadingLayer logoSrc={loadingLogo} stage="جاري تحميل حالة الطلبات..." version={runtimeVersion} />}
         <LoginView
           onLogin={handleLogin}
-          onSetupLocalAdmin={handleSetupLocalAdmin}
           onResetPassword={handleResetSupabasePassword}
-          supabaseMode={hasSupabaseConfig() && !localServerEnabled()}
-          localSetupMode={localServerEnabled()}
+          supabaseMode={hasSupabaseConfig()}
           message={message}
           onClearMessage={() => setMessage("")}
           busy={loading}

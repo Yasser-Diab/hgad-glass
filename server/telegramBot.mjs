@@ -205,7 +205,7 @@ function rowGlassDescription(row) {
 
 async function loadSupabase() {
   if (!supabaseUrl || !supabaseKey || !supabaseBotEmail || !supabaseBotPassword) {
-    throw new Error("Supabase bot authentication is incomplete. Set URL, anon key, TELEGRAM_SUPABASE_EMAIL, and TELEGRAM_SUPABASE_PASSWORD.");
+    throw new Error("Supabase bot authentication is incomplete. Save the bot account in Y.D Glass Manager settings.");
   }
   const client = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false, autoRefreshToken: false } });
   const authResult = await client.auth.signInWithPassword({
@@ -529,4 +529,8 @@ async function main() {
 process.on("SIGTERM", () => { stopRequested = true; });
 process.on("SIGINT", () => { stopRequested = true; });
 
-await main();
+await main().catch((error) => {
+  console.error(`Telegram bot startup failed: ${error?.message || error}`);
+  console.log("BOT_STATUS:failed");
+  process.exitCode = 2;
+});

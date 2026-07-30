@@ -34,6 +34,12 @@ test("Supabase login remains username-first and establishes the returned Auth se
   assert.match(appSource, /client\.auth\.setSession\(\{\s*access_token:\s*session\.access_token,\s*refresh_token:\s*session\.refresh_token/);
   assert.match(appSource, /if \(identity\.includes\("@"\)\)[\s\S]*client\.auth\.signInWithPassword[\s\S]*client\.rpc\("glass_auth_record_login"\)/);
   assert.match(appSource, /restoreSupabaseSessionUser[\s\S]*client\.auth\.getSession\(\)[\s\S]*supabaseProfileForAuthUser/);
+  assert.match(appSource, /const useSupabaseAuth = hasSupabaseConfig\(\)/);
+  assert.doesNotMatch(appSource, /const useSupabaseAuth = hasSupabaseConfig\(\) && !localServerEnabled\(\)/);
+  assert.doesNotMatch(
+    appSource.match(/async function restoreSupabaseSessionUser\(\)[\s\S]*?\n\}/)?.[0] || "",
+    /localServerEnabled/
+  );
   assert.doesNotMatch(appSource, /\{supabaseMode && \(\s*<Field label="البريد المسجل">/);
 });
 
@@ -49,7 +55,7 @@ test("admin user creation and password updates are routed through the secured fu
   assert.match(appSource, /invokeGlassAuth\("admin-create-user"/);
   assert.match(appSource, /invokeGlassAuth\("admin-update-user"/);
   assert.match(appSource, /غير مرتبط — أدخل كلمة مرور ثم احفظ/);
-  assert.match(appSource, /required=\{supabaseEnabled\(\) && !user\.auth_user_id\}/);
+  assert.match(appSource, /required=\{hasSupabaseConfig\(\) && !user\.auth_user_id\}/);
   assert.match(edgeSource, /async function requireActiveAdmin/);
   assert.match(edgeSource, /profile\.is_active === false \|\| profile\.role !== "admin"/);
   assert.match(edgeSource, /admin\.auth\.admin\.createUser/);

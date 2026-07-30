@@ -62,14 +62,19 @@ app.whenReady().then(() => {
   const androidSource = loadSource(androidSourcePath);
   const loadingSource = loadSource(loadingSourcePath);
   const traySource = cropTrayArtwork(loadSource(traySourcePath));
+  // Windows shell icons need a bold silhouette at 16–32 px. The Android
+  // artwork contains a second rounded frame and broad dark margins, which
+  // turns into an indistinct square in the taskbar. Use the tightly cropped,
+  // transparent glass-panel mark for Windows and browser chrome instead.
+  const desktopIconSource = traySource;
   const smallAppSource = loadSource(smallAppSourcePath);
-  const icoEntries = [16, 24, 32, 48, 64, 128, 256].map((size) => ({ size, png: pngAt(androidSource, size) }));
+  const icoEntries = [16, 20, 24, 32, 40, 48, 64, 128, 256].map((size) => ({ size, png: pngAt(desktopIconSource, size) }));
   fs.writeFileSync(path.join(root, "icons", "app-icon.ico"), icoFromPngEntries(icoEntries));
-  writePng("icons/app-icon.png", androidSource, 512);
+  writePng("icons/app-icon.png", desktopIconSource, 512);
   writePng("icons/tray-icon.png", traySource, 64);
   writePng("icons/in-app-logo.png", smallAppSource, 512);
   writePng("icons/loading-logo.png", loadingSource, 640);
-  writePng("public/app-icon.png", androidSource, 192);
+  writePng("public/app-icon.png", desktopIconSource, 192);
 
   const androidSizes = {
     "mipmap-mdpi": 48,
