@@ -451,7 +451,10 @@ export function applyReceiptBatch(order, batch, options = {}) {
   );
   const collectedPieces = [...receivedByRowId.values()].reduce((sum, quantity) => sum + quantity, 0);
   const receiptStatus = receiptStatusForTotals(built.orderedQuantity, collectedPieces);
-  const orderStatusField = hasOwn(options, "orderStatusField") ? options.orderStatusField : "status";
+  // Receipt progress is deliberately independent from the manually selected
+  // workflow status. A caller may opt into a legacy mapping explicitly, but a
+  // receipt operation must not overwrite order.status by default.
+  const orderStatusField = hasOwn(options, "orderStatusField") ? options.orderStatusField : null;
   const receiptStatusField = options.receiptStatusField || "receiptStatus";
   const collectedTotalField = options.collectedTotalField || "collectedPieces";
   const historyField = hasOwn(options, "historyField") ? options.historyField : "receiptHistory";
@@ -703,13 +706,10 @@ export function correctReceiptHistoryOperation(order, correction, options = {}) 
   );
   const collectedPieces = [...receivedByRowId.values()].reduce((sum, quantity) => sum + quantity, 0);
   const receiptStatus = receiptStatusForTotals(built.orderedQuantity, collectedPieces);
-  const mapReceiptStatusToOrderStatus = options.mapReceiptStatusToOrderStatus
-    || ((status) => ORDER_STATUS_BY_RECEIPT_STATUS[status]);
   const patch = Object.freeze({
     rows: correctedRows,
     collectedPieces,
-    receiptStatus,
-    status: mapReceiptStatusToOrderStatus(receiptStatus, order)
+    receiptStatus
   });
 
   return Object.freeze({

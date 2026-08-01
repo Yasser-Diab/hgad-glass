@@ -19,9 +19,9 @@ function pngAt(image, size) {
   return image.resize({ width: size, height: size, quality: "best" }).toPNG();
 }
 
-function cropTrayArtwork(image) {
+function cropTrayArtwork(image, cropRatio = 0.7) {
   const { width, height } = image.getSize();
-  const cropSize = Math.round(Math.min(width, height) * 0.7);
+  const cropSize = Math.round(Math.min(width, height) * cropRatio);
   return image.crop({
     x: Math.max(0, Math.round((width - cropSize) / 2)),
     y: Math.max(0, Math.round((height - cropSize) / 2 - height * 0.03)),
@@ -61,12 +61,13 @@ function writePng(relativePath, image, size) {
 app.whenReady().then(() => {
   const androidSource = loadSource(androidSourcePath);
   const loadingSource = loadSource(loadingSourcePath);
-  const traySource = cropTrayArtwork(loadSource(traySourcePath));
+  const trayArtwork = loadSource(traySourcePath);
+  const traySource = cropTrayArtwork(trayArtwork, 0.7);
   // Windows shell icons need a bold silhouette at 16–32 px. The Android
   // artwork contains a second rounded frame and broad dark margins, which
   // turns into an indistinct square in the taskbar. Use the tightly cropped,
   // transparent glass-panel mark for Windows and browser chrome instead.
-  const desktopIconSource = traySource;
+  const desktopIconSource = cropTrayArtwork(trayArtwork, 0.52);
   const smallAppSource = loadSource(smallAppSourcePath);
   const icoEntries = [16, 20, 24, 32, 40, 48, 64, 128, 256].map((size) => ({ size, png: pngAt(desktopIconSource, size) }));
   fs.writeFileSync(path.join(root, "icons", "app-icon.ico"), icoFromPngEntries(icoEntries));

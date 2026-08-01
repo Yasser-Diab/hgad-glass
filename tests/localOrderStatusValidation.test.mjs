@@ -44,18 +44,28 @@ test("accepts a selected-row receipt patch and derives the persisted total atomi
 
   assert.equal(result.persistedCollected, 3);
   assert.equal(result.totalOrdered, 8);
-  assert.equal(result.derivedStatus, "partial");
+  assert.equal(result.receiptStatus, "partial");
   assert.deepEqual(result.rows.map((row) => row.id), ["row-b"]);
 });
 
-test("allows status-only workflow changes while validating the existing collected total", () => {
+test("allows a status-only workflow change without reading or rewriting receipt totals", () => {
   const result = validate({
-    status: "partial",
-    collectedPieces: 1
+    operation: "status",
+    status: "ready",
+    collectedPieces: 999
   });
   assert.equal(result.rows.length, 0);
-  assert.equal(result.persistedCollected, 1);
-  assert.equal(result.derivedStatus, "partial");
+  assert.equal(result.operation, "status");
+  assert.equal(result.status, "ready");
+  assert.equal(result.persistedCollected, undefined);
+
+  const collectedResult = validate({
+    operation: "status",
+    status: "collected",
+    collectedPieces: 0
+  });
+  assert.equal(collectedResult.status, "collected");
+  assert.equal(collectedResult.persistedCollected, undefined);
 });
 
 test("rejects invalid status and a present non-array rows payload", () => {
@@ -109,11 +119,11 @@ test("rejects missing, duplicate, unknown, and wrong-order row IDs", () => {
 
 test("rejects nonnumeric, negative, excessive quantities and invalid history", () => {
   assert.throws(
-    () => validate({ status: "partial", collectedPieces: "1" }),
+    () => validate({ operation: "receipt", collectedPieces: "1", rows: [] }),
     validationCode("invalid_quantity")
   );
   assert.throws(
-    () => validate({ status: "ordered", collectedPieces: -1 }),
+    () => validate({ operation: "receipt", collectedPieces: -1, rows: [] }),
     validationCode("negative_collected_total")
   );
   assert.throws(
@@ -150,7 +160,7 @@ test("rejects nonnumeric, negative, excessive quantities and invalid history", (
   );
 });
 
-test("rejects mismatched collected totals and receipt-derived statuses", () => {
+test("rejects mismatched collected totals but never blocks a manual status from receipt progress", () => {
   assert.throws(
     () => validate({
       status: "partial",
@@ -159,12 +169,11 @@ test("rejects mismatched collected totals and receipt-derived statuses", () => {
     }),
     validationCode("collected_total_mismatch")
   );
-  assert.throws(
-    () => validate({
-      status: "ready",
-      collectedPieces: 3,
-      rows: [{ id: "row-b", receivedQuantity: 2, receiptHistory: [] }]
-    }),
-    validationCode("receipt_status_mismatch")
-  );
+  const receiptResult = validate({
+    status: "ready",
+    collectedPieces: 3,
+    rows: [{ id: "row-b", receivedQuantity: 2, receiptHistory: [] }]
+  });
+  assert.equal(receiptResult.receiptStatus, "partial");
+  assert.equal(receiptResult.status, undefined);
 });

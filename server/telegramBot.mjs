@@ -233,10 +233,16 @@ async function loadSupabase() {
   if (profile.role !== "admin" && profile.can_view_costs !== true) {
     throw new Error("Supabase bot profile does not have cost-view permission.");
   }
-  const [orders, rows] = await Promise.all([
-    supabaseRpcAll(client, "load_glass_orders"),
-    supabaseRpcAll(client, "load_glass_order_rows")
+  const [orders, rows, countsResult] = await Promise.all([
+    supabaseRpcAllCompat(client, "load_glass_orders_page", "load_glass_orders"),
+    supabaseRpcAllCompat(client, "load_glass_order_rows_page", "load_glass_order_rows"),
+    supabaseDataCountsCompat(client)
   ]);
+  const expectedOrderCount = Number(countsResult?.order_count);
+  const expectedRowCount = Number(countsResult?.row_count);
+  if (orders.length !== expectedOrderCount || rows.length !== expectedRowCount) {
+    throw new Error(`Order data is incomplete: expected ${expectedOrderCount}/${expectedRowCount}, loaded ${orders.length}/${rows.length}.`);
+  }
   const byOrder = new Map();
   for (const row of rows || []) {
     if (!byOrder.has(row.order_id)) byOrder.set(row.order_id, []);
@@ -279,12 +285,54 @@ async function supabaseRpcAll(client, functionName, args = {}) {
   const pageSize = 1000;
   const rows = [];
   for (let from = 0; ; from += pageSize) {
-    const result = await client.rpc(functionName, args).range(from, from + pageSize - 1);
+    const result = await client.rpc(functionName, {
+      ...args,
+      p_offset: from,
+      p_limit: pageSize
+    });
     if (result.error) throw result.error;
     rows.push(...(result.data || []));
     if (!result.data || result.data.length < pageSize) break;
   }
   return rows;
+}
+
+function missingRpcFunction(error, functionName) {
+  const code = String(error?.code || "").trim().toUpperCase();
+  const message = [error?.message, error?.details, error?.hint].filter(Boolean).join(" ");
+  return (code === "PGRST202" || /could not find the function|schema cache/i.test(message))
+    && message.toLocaleLowerCase().includes(String(functionName).toLocaleLowerCase());
+}
+
+async function supabaseRpcAllCompat(client, pagedFunctionName, legacyFunctionName, args = {}) {
+  try {
+    return await supabaseRpcAll(client, pagedFunctionName, args);
+  } catch (error) {
+    if (!missingRpcFunction(error, pagedFunctionName)) throw error;
+  }
+
+  const pageSize = 1000;
+  const rows = [];
+  for (let from = 0; ; from += pageSize) {
+    const result = await client.rpc(legacyFunctionName, args).range(from, from + pageSize - 1);
+    if (result.error) throw result.error;
+    rows.push(...(result.data || []));
+    if (!result.data || result.data.length < pageSize) break;
+  }
+  return rows;
+}
+
+async function supabaseDataCountsCompat(client) {
+  const rpcResult = await client.rpc("load_glass_data_counts");
+  if (!rpcResult.error) return rpcResult.data;
+  if (!missingRpcFunction(rpcResult.error, "load_glass_data_counts")) throw rpcResult.error;
+  const [ordersResult, rowsResult] = await Promise.all([
+    client.from("glass_orders").select("id", { count: "exact", head: true }),
+    client.from("glass_order_rows").select("id", { count: "exact", head: true })
+  ]);
+  if (ordersResult.error) throw ordersResult.error;
+  if (rowsResult.error) throw rowsResult.error;
+  return { order_count: Number(ordersResult.count), row_count: Number(rowsResult.count) };
 }
 
 async function loadDataSource() {

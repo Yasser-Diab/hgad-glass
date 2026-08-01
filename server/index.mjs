@@ -446,6 +446,9 @@ async function migrate() {
     create table if not exists glass_orders (id text primary key, order_no text not null unique, document_id text, order_date text not null, entry_at text, status text not null default 'draft', entry_mode text not null default 'normal', collected_pieces real not null default 0, customer_id text, supplier_id text, customer_name text, supplier_name text, project text, code text, notes text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
     create table if not exists glass_order_rows (id text primary key, order_id text not null, line_no integer not null default 1, glass_mode text not null default 'single', code text, quantity real not null default 1, unit_price real not null default 0, supplier_unit_price real not null default 0, material_unit_price real not null default 0, supplier_material_unit_price real not null default 0, double_gap text, triplex_pvb text, extra_direction text, notes text, received_quantity real, receipt_history text not null default '[]', layers text not null, drawing text not null, area_m2 real not null default 0, cost real not null default 0, supplier_cost real not null default 0, created_at text not null default current_timestamp);
     create table if not exists learned_options (id text primary key, kind text not null, value text not null, unique(kind, value));
+    create table if not exists order_revisions (id text primary key, order_id text not null, revision_number integer not null, snapshot jsonb not null, changed_by text, change_type text not null, app_version text not null default '0.1.10', client_type text not null default 'local-server', created_at text not null default current_timestamp, unique(order_id, revision_number));
+    create table if not exists order_row_audit (id text primary key, order_id text not null, row_id text not null, action text not null, previous_value jsonb, new_value jsonb, changed_by text, app_version text not null default '0.1.10', client_type text not null default 'local-server', created_at text not null default current_timestamp);
+    create table if not exists order_item_recovery_staging (recovery_id text primary key, order_id text, order_number text, source_type text not null, source_reference text, line_number integer, recovered_payload jsonb not null, reviewed boolean not null default false, applied boolean not null default false, created_at text not null default current_timestamp);
     alter table glass_order_rows add column if not exists material_unit_price real not null default 0;
     alter table glass_order_rows add column if not exists supplier_material_unit_price real not null default 0;
     alter table glass_order_rows add column if not exists notes text;
@@ -463,6 +466,41 @@ async function migrate() {
   `);
   await migrateLegacyLocalPasswords();
   await bootstrapLocalAdminFromEnvironment();
+}
+
+async function captureLocalOrderRevision(orderId, changeType, changedBy = null) {
+  if (!orderId) return null;
+  const [orderResult, rowsResult, revisionResult] = await Promise.all([
+    db.query("select * from glass_orders where id = $1 limit 1", [orderId]),
+    db.query("select * from glass_order_rows where order_id = $1 order by line_no, id", [orderId]),
+    db.query("select coalesce(max(revision_number), 0)::integer + 1 as next_revision from order_revisions where order_id = $1", [orderId])
+  ]);
+  const order = orderResult.rows[0];
+  if (!order) return null;
+  const revisionNumber = Number(revisionResult.rows[0]?.next_revision || 1);
+  await db.query(
+    `insert into order_revisions (id, order_id, revision_number, snapshot, changed_by, change_type, app_version, client_type)
+     values ($1,$2,$3,$4::jsonb,$5,$6,'0.1.10','local-server')`,
+    [gid("rev"), orderId, revisionNumber, JSON.stringify({ order, rows: rowsResult.rows }), changedBy, changeType]
+  );
+  return revisionNumber;
+}
+
+async function auditLocalOrderRow(orderId, rowId, action, previousValue, newValue, changedBy = null) {
+  if (previousValue && newValue && JSON.stringify(previousValue) === JSON.stringify(newValue)) return;
+  await db.query(
+    `insert into order_row_audit (id, order_id, row_id, action, previous_value, new_value, changed_by, app_version, client_type)
+     values ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,'0.1.10','local-server')`,
+    [
+      gid("audit"),
+      orderId,
+      rowId,
+      action,
+      previousValue == null ? null : JSON.stringify(previousValue),
+      newValue == null ? null : JSON.stringify(newValue),
+      changedBy
+    ]
+  );
 }
 
 async function ensureParty(table, name) {
@@ -491,7 +529,7 @@ async function bootstrap({ canViewCosts = true } = {}) {
     db.query("select * from supplier_payments order by paid_at desc"),
     db.query("select id, username, email, auth_user_id, display_name, role, can_view_costs, is_active, last_login_at, created_at from users order by created_at, username"),
     db.query("select * from glass_orders order by order_date desc, order_no desc"),
-    db.query("select * from glass_order_rows order by line_no"),
+    db.query("select * from glass_order_rows order by order_id, line_no, id"),
     db.query("select * from learned_options where kind = 'double_gap'")
   ]);
   const byOrder = new Map();
@@ -603,6 +641,12 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
         }
       }
       let rowsForSave = validation.payloadRows;
+      const expectedItemCount = Number(order.expectedItemCount);
+      if (!Number.isInteger(expectedItemCount) || expectedItemCount !== rowsForSave.length) {
+        const error = httpError("أُلغي حفظ الطلب لأن عدد البنود المرسل غير مكتمل.", 422);
+        error.code = "ORDER_ITEM_COUNT_MISMATCH";
+        throw error;
+      }
       let protectedSupplierCosts = new Map();
       if (options.preserveSupplierCosts === true) {
         if (!savedId) {
@@ -625,7 +669,7 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
       }
       const explicitlyDeletedRowIds = [...new Set((order.deletedRowIds || []).map(clean).filter(Boolean))];
       const existingRows = savedId
-        ? await db.query("select id from glass_order_rows where order_id = $1 for update", [savedId])
+        ? await db.query("select * from glass_order_rows where order_id = $1 for update", [savedId])
         : { rows: [] };
       const existingRowIds = new Set(existingRows.rows.map((row) => clean(row.id)));
       const incomingRowIdSet = new Set(incomingRowIds);
@@ -638,6 +682,11 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
         error.fields = implicitlyMissingRows.map((rowId) => ({ scope: "row", rowId, field: "row", message: "يوجد بند محفوظ غير موجود في الطلب الحالي ولم يتم حذفه صراحة." }));
         throw error;
       }
+      const wasExistingOrder = !!savedId;
+      if (wasExistingOrder) {
+        await captureLocalOrderRevision(savedId, "order_update", options.changedBy || null);
+      }
+      const existingRowsById = new Map(existingRows.rows.map((row) => [clean(row.id), row]));
       const params = [
         candidateOrderNo,
         order.documentId || null,
@@ -691,10 +740,48 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
              supplier_cost=excluded.supplier_cost`,
           [rowId, savedId, index + 1, row.glassMode || "single", row.code || "", rowPhysicalQuantity(row), unitPrice, supplierUnitPrice, materialUnitPrice, supplierMaterialUnitPrice, row.doubleGap || null, row.triplexPvb || null, row.extraDirection || null, row.notes || "", row.receivedQuantity == null || row.receivedQuantity === "" ? null : num(row.receivedQuantity), JSON.stringify(Array.isArray(row.receiptHistory) ? row.receiptHistory : []), JSON.stringify(row.layers || []), JSON.stringify(row.drawing || { shapes: [], paths: [], edges: { top: 0, right: 0, bottom: 0, left: 0 }, panels: [] }), totals.area, totals.total, protectedSupplierCosts.has(rowId) ? protectedSupplierCosts.get(rowId) : totals.supplierCost]
         );
+        const persistedRow = await db.query("select * from glass_order_rows where id = $1 limit 1", [rowId]);
+        await auditLocalOrderRow(
+          savedId,
+          rowId,
+          existingRowsById.has(rowId) ? "row_edited" : "row_created",
+          existingRowsById.get(rowId) || null,
+          persistedRow.rows[0] || null,
+          options.changedBy || null
+        );
       }
       if (explicitlyDeletedRowIds.length) {
+        for (const rowId of explicitlyDeletedRowIds) {
+          await auditLocalOrderRow(
+            savedId,
+            rowId,
+            "row_explicitly_deleted",
+            existingRowsById.get(rowId) || null,
+            null,
+            options.changedBy || null
+          );
+        }
         const placeholders = explicitlyDeletedRowIds.map((_, index) => `$${index + 2}`).join(",");
         await db.query(`delete from glass_order_rows where order_id = $1 and id in (${placeholders})`, [savedId, ...explicitlyDeletedRowIds]);
+      }
+      const persistedRows = await db.query(
+        "select id from glass_order_rows where order_id = $1 order by line_no, id",
+        [savedId]
+      );
+      const persistedRowIds = persistedRows.rows.map((row) => clean(row.id));
+      const persistedRowIdSet = new Set(persistedRowIds);
+      const missingSavedRowIds = savedRowIds.filter((rowId) => !persistedRowIdSet.has(clean(rowId)));
+      if (
+        persistedRowIds.length !== expectedItemCount
+        || persistedRowIdSet.size !== expectedItemCount
+        || missingSavedRowIds.length
+      ) {
+        const error = httpError("أُلغي تحديث الطلب لأن قاعدة البيانات لم تؤكد حفظ جميع البنود.", 409);
+        error.code = "ORDER_ITEM_COUNT_MISMATCH";
+        throw error;
+      }
+      if (!wasExistingOrder) {
+        await captureLocalOrderRevision(savedId, "order_created", options.changedBy || null);
       }
       if (managesTransaction) await db.exec("commit");
       order.orderNo = candidateOrderNo;
@@ -702,6 +789,10 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
       order.rows = rowsForSave;
       order.originalRowIds = savedRowIds.map(String);
       order.deletedRowIds = [];
+      order._persistenceIntegrity = {
+        persisted_rows: persistedRowIds.length,
+        persisted_row_ids: persistedRowIds
+      };
       return shouldBootstrap ? bootstrap() : order;
     } catch (error) {
       if (managesTransaction) {
@@ -716,7 +807,7 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
   throw new Error("تعذر إنشاء رقم فريد للطلب، ولم يتم فقد أي من البيانات المدخلة. يرجى إعادة المحاولة.");
 }
 
-async function patchOrderStatus(identifier, patch = {}) {
+async function patchOrderStatus(identifier, patch = {}, options = {}) {
   const key = clean(identifier || patch.id || patch.orderNo);
   if (!key) throw httpError("لا يوجد رقم طلب صالح للتحديث.");
   try {
@@ -727,10 +818,13 @@ async function patchOrderStatus(identifier, patch = {}) {
     );
     const orderId = existing.rows[0]?.id;
     if (!orderId) throw httpError("الطلب غير موجود.", 404);
-    const storedRows = await db.query(
-      "select id, quantity, received_quantity from glass_order_rows where order_id = $1 for update",
-      [orderId]
-    );
+    const receiptOperation = patch.operation === "receipt" || Object.prototype.hasOwnProperty.call(patch, "rows");
+    const storedRows = receiptOperation
+      ? await db.query(
+        "select * from glass_order_rows where order_id = $1 for update",
+        [orderId]
+      )
+      : { rows: [] };
     const incomingIds = Array.isArray(patch.rows)
       ? [...new Set(patch.rows.map((row) => clean(row?.id)).filter(Boolean))]
       : [];
@@ -749,7 +843,13 @@ async function patchOrderStatus(identifier, patch = {}) {
       storedRows: storedRows.rows,
       knownRowOwners
     });
-    if (validated.rows.length) {
+    await captureLocalOrderRevision(
+      orderId,
+      validated.operation === "receipt" ? "receipt_update" : "status_update",
+      options.changedBy || null
+    );
+    if (validated.operation === "receipt" && validated.rows.length) {
+      const storedRowsById = new Map(storedRows.rows.map((row) => [clean(row.id), row]));
       const values = [];
       const params = [];
       for (const [index, row] of validated.rows.entries()) {
@@ -769,18 +869,40 @@ async function patchOrderStatus(identifier, patch = {}) {
          where target.id=source.id and target.order_id=$${params.length}`,
         params
       );
+      for (const row of validated.rows) {
+        const persistedRow = await db.query(
+          "select * from glass_order_rows where id = $1 and order_id = $2 limit 1",
+          [row.id, orderId]
+        );
+        await auditLocalOrderRow(
+          orderId,
+          row.id,
+          "receipt_updated",
+          storedRowsById.get(row.id) || null,
+          persistedRow.rows[0] || null,
+          options.changedBy || null
+        );
+      }
     }
-    await db.query(
-      "update glass_orders set document_id=$1, status=$2, collected_pieces=$3, updated_at=current_timestamp where id=$4",
-      [patch.documentId || null, validated.status, validated.persistedCollected, orderId]
-    );
+    if (validated.operation === "receipt") {
+      await db.query(
+        "update glass_orders set collected_pieces=$1, updated_at=current_timestamp where id=$2",
+        [validated.persistedCollected, orderId]
+      );
+    } else {
+      await db.query(
+        "update glass_orders set document_id=$1, status=$2, updated_at=current_timestamp where id=$3",
+        [patch.documentId || null, validated.status, orderId]
+      );
+    }
     await db.exec("commit");
     return {
       order: {
         ...patch,
         id: orderId,
-        status: validated.status,
-        collectedPieces: validated.persistedCollected
+        ...(validated.operation === "receipt"
+          ? { collectedPieces: validated.persistedCollected, receiptStatus: validated.receiptStatus }
+          : { status: validated.status })
       }
     };
   } catch (error) {
@@ -789,7 +911,7 @@ async function patchOrderStatus(identifier, patch = {}) {
   }
 }
 
-async function deleteOrder(identifier, shouldBootstrap = true) {
+async function deleteOrder(identifier, shouldBootstrap = true, options = {}) {
   const key = clean(identifier);
   if (!key) throw new Error("لا يوجد رقم طلب صالح للحذف.");
   const existing = await db.query("select id from glass_orders where id = $1 or order_no = $1 limit 1", [key]);
@@ -797,6 +919,18 @@ async function deleteOrder(identifier, shouldBootstrap = true) {
   if (!orderId) throw new Error("الطلب غير موجود.");
   try {
     await db.exec("begin");
+    await captureLocalOrderRevision(orderId, "order_deleted", options.changedBy || null);
+    const storedRows = await db.query("select * from glass_order_rows where order_id = $1 order by line_no, id", [orderId]);
+    for (const row of storedRows.rows) {
+      await auditLocalOrderRow(
+        orderId,
+        row.id,
+        "row_explicitly_deleted",
+        row,
+        null,
+        options.changedBy || null
+      );
+    }
     await db.query("delete from glass_order_rows where order_id = $1", [orderId]);
     await db.query("delete from glass_orders where id = $1", [orderId]);
     await db.exec("commit");
@@ -1106,8 +1240,13 @@ app.put("/api/users/:id/password", async (req, res) => {
 app.post("/api/orders", async (req, res) => {
   try {
     const order = req.body || {};
-    await saveOrder(order, false, { preserveSupplierCosts: !req.localSession.canViewCosts });
-    res.json({ order });
+    const savedOrder = await saveOrder(order, false, {
+      preserveSupplierCosts: !req.localSession.canViewCosts,
+      changedBy: req.localSession.userId
+    });
+    const persistence = savedOrder._persistenceIntegrity;
+    delete savedOrder._persistenceIntegrity;
+    res.json({ order: savedOrder, persistence });
   } catch (error) {
     const message = duplicateOrderNoError(error)
       ? "تعذر إنشاء رقم فريد للطلب، ولم يتم فقد أي من البيانات المدخلة. يرجى إعادة المحاولة."
@@ -1122,7 +1261,7 @@ app.post("/api/orders", async (req, res) => {
 });
 app.patch("/api/orders/:id/status", async (req, res) => {
   try {
-    res.json(await patchOrderStatus(req.params.id, req.body || {}));
+    res.json(await patchOrderStatus(req.params.id, req.body || {}, { changedBy: req.localSession.userId }));
   } catch (error) {
     res.status(error.statusCode || error.httpStatus || 500).json({
       error: error.message,
@@ -1131,7 +1270,7 @@ app.patch("/api/orders/:id/status", async (req, res) => {
   }
 });
 app.delete("/api/orders/:id", async (req, res) => {
-  try { res.json(await deleteOrder(req.params.id, false)); } catch (error) { res.status(500).json({ error: error.message }); }
+  try { res.json(await deleteOrder(req.params.id, false, { changedBy: req.localSession.userId })); } catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post("/api/payments", async (req, res) => {
   try {

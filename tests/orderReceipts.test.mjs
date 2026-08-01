@@ -142,7 +142,8 @@ test("applies only selected rows, leaves the source immutable, and creates one r
   assert.equal(result.order.rows[1].received, 2);
   assert.equal(result.order.collectedPieces, 3);
   assert.equal(result.order.receiptStatus, RECEIPT_STATUS.PARTIAL);
-  assert.equal(result.order.status, "partial");
+  assert.equal(result.order.status, "ready");
+  assert.equal(Object.prototype.hasOwnProperty.call(result.patch, "status"), false);
   assert.equal(result.history.length, 1);
   assert.deepEqual(result.history[0], {
     operationId: "receipt-op-1",
@@ -163,7 +164,7 @@ test("applies only selected rows, leaves the source immutable, and creates one r
   assert.equal(result.order.receiptHistory[0].items.length, 1);
 });
 
-test("derives fully received and current collected order statuses only when every row is complete", () => {
+test("derives fully received progress without replacing the manual workflow status", () => {
   const order = {
     id: "order-3",
     status: "partial",
@@ -186,7 +187,7 @@ test("derives fully received and current collected order statuses only when ever
   assert.equal(result.collectedPieces, 7);
   assert.equal(result.receiptStatus, RECEIPT_STATUS.FULLY_RECEIVED);
   assert.equal(result.order.receiptStatus, RECEIPT_STATUS.FULLY_RECEIVED);
-  assert.equal(result.order.status, "collected");
+  assert.equal(result.order.status, "partial");
   assert.equal(result.history[0].previousRemainingQuantity, 2);
   assert.equal(result.history[0].newRemainingQuantity, 0);
 });
@@ -275,7 +276,8 @@ test("corrects one receipt operation and deterministically recalculates later sn
   assert.strictEqual(result.order.rows[1], original.rows[1]);
   assert.equal(result.order.rows[0].received, 9);
   assert.equal(result.order.collectedPieces, 12);
-  assert.equal(result.order.status, "partial");
+  assert.equal(result.order.status, "collected");
+  assert.equal(Object.prototype.hasOwnProperty.call(result.patch, "status"), false);
   assert.equal(result.order.rows[0].receiptHistory[0].quantityReceived, 3);
   assert.equal(result.order.rows[0].receiptHistory[0].recordedAt, "2026-07-28T10:00:00.000Z");
   assert.deepEqual(result.order.rows[0].receiptHistory[0].recordedBy, firstRecordedBy);

@@ -5,8 +5,12 @@ import { PGlite } from "@electric-sql/pglite";
 
 const mainSource = readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const schemaSource = readFileSync(new URL("../supabase/schema.sql", import.meta.url), "utf8");
-const migrationSource = readFileSync(
+const validationMigrationSource = readFileSync(
   new URL("../supabase/migrations/20260801180000_restore_order_save_validation.sql", import.meta.url),
+  "utf8"
+);
+const integrityMigrationSource = readFileSync(
+  new URL("../supabase/migrations/20260801194244_emergency_order_integrity_hotfix.sql", import.meta.url),
   "utf8"
 );
 
@@ -56,25 +60,26 @@ test("delete Undo restores through the same full-order save path", () => {
   assert.match(mainSource, /saveOrderToSupabase\(client,\s*normalized\)/);
 });
 
-test("migration and authoritative schema expose the same secured validated transaction", () => {
-  assert.equal(canonicalAtomicSql(schemaSource), canonicalAtomicSql(migrationSource));
-  assert.match(migrationSource, /security definer/);
-  assert.match(migrationSource, /app_private\.current_user_is_active\(\)/);
-  assert.match(migrationSource, /if order_exists then[\s\S]*update public\.glass_orders[\s\S]*else[\s\S]*insert into public\.glass_orders/);
-  assert.match(migrationSource, /if row_exists then[\s\S]*update public\.glass_order_rows[\s\S]*else[\s\S]*insert into public\.glass_order_rows/);
-  assert.match(migrationSource, /existing_row_order_id <> order_id_value/);
-  assert.match(migrationSource, /ORDER_VALIDATION_FAILED/);
-  assert.match(migrationSource, /customer_id_value is null/);
-  assert.match(migrationSource, /supplier_id_value is null/);
-  assert.match(migrationSource, /jsonb_array_length\(p_rows\) = 0/);
-  assert.match(migrationSource, /missing_row_ids/);
-  assert.match(migrationSource, /id::text = any\(deleted_row_ids\)/);
-  assert.doesNotMatch(migrationSource, /not \(id::text = any\(saved_row_ids\)\)/);
-  assert.match(migrationSource, /order_id_value public\.glass_orders\.id%type/);
-  assert.match(migrationSource, /row_id_value public\.glass_order_rows\.id%type/);
-  assert.doesNotMatch(migrationSource, /on conflict/i);
-  assert.match(migrationSource, /revoke all on function public\.save_glass_order_atomic\(jsonb, jsonb\)[\s\S]*from public, anon/);
-  assert.match(migrationSource, /grant execute on function public\.save_glass_order_atomic\(jsonb, jsonb\)[\s\S]*to authenticated/);
+test("validation migration remains the private base and the authoritative schema exposes the integrity wrapper", () => {
+  assert.equal(canonicalAtomicSql(schemaSource), canonicalAtomicSql(integrityMigrationSource));
+  assert.match(validationMigrationSource, /security definer/);
+  assert.match(validationMigrationSource, /app_private\.current_user_is_active\(\)/);
+  assert.match(validationMigrationSource, /if order_exists then[\s\S]*update public\.glass_orders[\s\S]*else[\s\S]*insert into public\.glass_orders/);
+  assert.match(validationMigrationSource, /if row_exists then[\s\S]*update public\.glass_order_rows[\s\S]*else[\s\S]*insert into public\.glass_order_rows/);
+  assert.match(validationMigrationSource, /existing_row_order_id <> order_id_value/);
+  assert.match(validationMigrationSource, /ORDER_VALIDATION_FAILED/);
+  assert.match(validationMigrationSource, /customer_id_value is null/);
+  assert.match(validationMigrationSource, /supplier_id_value is null/);
+  assert.match(validationMigrationSource, /jsonb_array_length\(p_rows\) = 0/);
+  assert.match(validationMigrationSource, /missing_row_ids/);
+  assert.match(validationMigrationSource, /id::text = any\(deleted_row_ids\)/);
+  assert.doesNotMatch(validationMigrationSource, /not \(id::text = any\(saved_row_ids\)\)/);
+  assert.match(integrityMigrationSource, /expected_item_count/);
+  assert.match(integrityMigrationSource, /ORDER_ITEM_COUNT_MISMATCH/);
+  assert.match(integrityMigrationSource, /persisted_row_ids/);
+  assert.match(integrityMigrationSource, /app_private\.save_glass_order_atomic_v010/);
+  assert.match(integrityMigrationSource, /revoke all on function public\.save_glass_order_atomic\(jsonb, jsonb\)[\s\S]*from public, anon/);
+  assert.match(integrityMigrationSource, /grant execute on function public\.save_glass_order_atomic\(jsonb, jsonb\)[\s\S]*to authenticated/);
 });
 
 test("atomic RPC updates, prunes, and rolls back a foreign-row save as one transaction", async () => {
@@ -136,7 +141,7 @@ test("atomic RPC updates, prunes, and rolls back a foreign-row save as one trans
       updated_at timestamptz not null default now()
     );
   `);
-  await db.exec(migrationSource);
+  await db.exec(validationMigrationSource);
 
   const orderA = "00000000-0000-4000-8000-000000000001";
   const orderB = "00000000-0000-4000-8000-000000000002";

@@ -59,9 +59,20 @@ export function validateLocalOrderStatusPatch({
   storedRows = [],
   knownRowOwners = []
 }) {
+  const operation = patch.operation === "receipt" || Object.prototype.hasOwnProperty.call(patch, "rows")
+    ? "receipt"
+    : "status";
   const status = String(patch.status ?? "").trim().toLowerCase();
-  if (!LOCAL_ORDER_STATUSES.includes(status)) {
+  if (operation === "status" && !LOCAL_ORDER_STATUSES.includes(status)) {
     fail("invalid_status", "حالة الطلب غير صالحة.");
+  }
+
+  if (operation === "status") {
+    return Object.freeze({
+      operation,
+      status,
+      rows: Object.freeze([])
+    });
   }
 
   const requestedCollected = strictJsonNumber(
@@ -138,28 +149,19 @@ export function validateLocalOrderStatusPatch({
   if (persistedCollected > totalOrdered + EPSILON) {
     fail("collected_total_exceeds_ordered", "إجمالي الكمية المستلمة أكبر من إجمالي الكمية المطلوبة.");
   }
-  const derivedStatus = persistedCollected <= EPSILON
-    ? "ordered"
+  const receiptStatus = persistedCollected <= EPSILON
+    ? "not_received"
     : totalOrdered > EPSILON && persistedCollected >= totalOrdered - EPSILON
-      ? "collected"
+      ? "fully_received"
       : "partial";
-  if (!["pricing", "cancelled", "draft"].includes(status)) {
-    const inconsistentReceivedStatus = ["partial", "collected"].includes(derivedStatus)
-      && status !== derivedStatus;
-    const inconsistentEmptyStatus = derivedStatus === "ordered"
-      && ["partial", "collected"].includes(status);
-    if (inconsistentReceivedStatus || inconsistentEmptyStatus) {
-      fail("receipt_status_mismatch", "حالة الطلب لا تطابق كميات الاستلام.");
-    }
-  }
 
   return Object.freeze({
-    status,
+    operation,
     rows: Object.freeze(normalizedRows),
     requestedCollected,
     persistedCollected,
     totalOrdered,
     totalReceived,
-    derivedStatus
+    receiptStatus
   });
 }

@@ -82,7 +82,6 @@ import {
   validationErrorKey
 } from "./orderSaveValidation.js";
 import {
-  ORDER_STATUS_BY_RECEIPT_STATUS,
   RECEIPT_STATUS,
   ReceiptValidationError,
   applyReceiptBatch,
@@ -91,6 +90,12 @@ import {
   correctReceiptHistoryOperation,
   validateReceiptBatch
 } from "./orderReceipts.js";
+import {
+  assertCompleteGlassData,
+  loadAllRpcPagesCompat,
+  loadGlassDataCountsCompat
+} from "./supabasePaging.js";
+import { verifyOrderSaveIntegrity } from "./orderPersistenceIntegrity.js";
 import {
   DESKTOP_AUTH_RECOVERY_REDIRECT_URL,
   establishSupabaseRecoverySession
@@ -1058,7 +1063,6 @@ function applyAbsoluteOrderReceiptPatch(order, requestedTotal, currentUser) {
     rows,
     collectedPieces,
     receiptStatus,
-    status: ORDER_STATUS_BY_RECEIPT_STATUS[receiptStatus],
     _receiptChangedRowIds: receiptChangedRowIds
   };
 }
@@ -3767,10 +3771,10 @@ async function supabaseSelectAll(client, table, columns = "*", configure = (quer
   return rows;
 }
 
-async function supabaseRpcRows(client, functionName, args = {}) {
+async function supabaseRpcValue(client, functionName, args = {}) {
   const result = await client.rpc(functionName, args);
   if (result.error) throw result.error;
-  return result.data || [];
+  return result.data;
 }
 
 async function supabaseUsers(client) {
@@ -3933,20 +3937,44 @@ async function changeSupabaseAppUserPassword(currentUser, currentPassword, newPa
   return currentUser;
 }
 
+async function loadSupabaseStage(label, loader) {
+  const startedAt = performance.now();
+  try {
+    const result = await loader();
+    console.info(`[Supabase] ${label} loaded in ${Math.round(performance.now() - startedAt)}ms`);
+    return result;
+  } catch (error) {
+    const elapsed = Math.round(performance.now() - startedAt);
+    console.error(`[Supabase] ${label} failed after ${elapsed}ms: ${safeErrorMessage(error)}`);
+    if (error && typeof error === "object" && !error.operation) error.operation = label;
+    throw error;
+  }
+}
+
 async function loadData() {
   const localLearnedTableOptions = readLearnedTableOptions();
   const client = supabaseEnabled() ? getSupabaseClient() : null;
   if (client) {
     try {
-      const [customers, suppliers, payments, users, orders, rows, options] = await Promise.all([
-        supabaseSelectAll(client, "customers", "*", (query) => query.order("name")),
-        supabaseSelectAll(client, "suppliers", "*", (query) => query.order("name")),
-        supabaseSelectAll(client, "supplier_payments", "*", (query) => query.order("paid_at", { ascending: false })),
-        supabaseUsers(client),
-        supabaseRpcRows(client, "load_glass_orders"),
-        supabaseRpcRows(client, "load_glass_order_rows"),
-        supabaseSelectAll(client, "learned_options", "*", (query) => query.eq("kind", "double_gap"))
+      const [customers, suppliers, payments, users, integrityCounts, options] = await Promise.all([
+        loadSupabaseStage("customers", () => supabaseSelectAll(client, "customers", "*", (query) => query.order("name"))),
+        loadSupabaseStage("suppliers", () => supabaseSelectAll(client, "suppliers", "*", (query) => query.order("name"))),
+        loadSupabaseStage("supplier payments", () => supabaseSelectAll(client, "supplier_payments", "*", (query) => query.order("paid_at", { ascending: false }))),
+        loadSupabaseStage("users", () => supabaseUsers(client)),
+        loadSupabaseStage("integrity counts", () => loadGlassDataCountsCompat(client)),
+        loadSupabaseStage("learned options", () => supabaseSelectAll(client, "learned_options", "*", (query) => query.eq("kind", "double_gap")))
       ]);
+      const [orders, rows] = await Promise.all([
+        loadSupabaseStage("orders", () => loadAllRpcPagesCompat(client, "load_glass_orders_page", "load_glass_orders", {}, {
+          expectedCount: integrityCounts?.order_count,
+          concurrency: 3
+        })),
+        loadSupabaseStage("order rows", () => loadAllRpcPagesCompat(client, "load_glass_order_rows_page", "load_glass_order_rows", {}, {
+          expectedCount: integrityCounts?.row_count,
+          concurrency: 3
+        }))
+      ]);
+      assertCompleteGlassData(orders, rows, integrityCounts);
       const byOrder = new Map();
       for (const row of rows || []) {
         const item = makeRow({
@@ -4036,7 +4064,7 @@ async function saveOrderToStore(order, data) {
   if (!validation.isValid) {
     throw new Error(validation.errors[0]?.message || "تعذر حفظ الطلب لوجود بيانات مطلوبة غير مكتملة.");
   }
-  const normalized = { ...orderSaveSnapshot({ ...order, rows: validation.payloadRows }), status: normalizeOrderStatus(order.status), collectedPieces: databaseNumber(order.collectedPieces, 0), customerName: cleanName(order.customerName), supplierName: cleanName(order.supplierName) };
+  const normalized = { ...orderSaveSnapshot({ ...order, rows: validation.payloadRows }), expectedItemCount: validation.payloadRows.length, status: normalizeOrderStatus(order.status), collectedPieces: databaseNumber(order.collectedPieces, 0), customerName: cleanName(order.customerName), supplierName: cleanName(order.supplierName) };
   if (order._existingOrder === true) normalized._existingOrder = true;
   if (localServerEnabled()) {
     try {
@@ -4044,6 +4072,7 @@ async function saveOrderToStore(order, data) {
         method: "POST",
         body: JSON.stringify(normalized)
       }, 10000);
+      verifyOrderSaveIntegrity(result?.persistence, result?.order?.rows || normalized.rows);
       return result?.order ? mergeSavedOrderData(data, result.order) : result;
     } catch (error) {
       if (!isConnectivityError(error)) throw error;
@@ -4085,32 +4114,47 @@ function receiptRowsForPersistence(order, rowsChanged, changedRowIds = []) {
 }
 
 function orderStatusPersistencePayload(order, rowsChanged, changedRowIds = []) {
-  return {
+  const identity = {
     id: order.id || "",
-    orderNo: order.orderNo || "",
-    documentId: order.documentId || "",
-    status: normalizeOrderStatus(order.status),
-    collectedPieces: databaseNumber(order.collectedPieces, 0),
-    ...(rowsChanged ? {
+    orderNo: order.orderNo || ""
+  };
+  if (rowsChanged) {
+    return {
+      ...identity,
+      operation: "receipt",
+      collectedPieces: databaseNumber(order.collectedPieces, 0),
       rows: receiptRowsForPersistence(order, true, changedRowIds)
-    } : {})
+    };
+  }
+  return {
+    ...identity,
+    operation: "status",
+    documentId: order.documentId || "",
+    status: normalizeOrderStatus(order.status)
   };
 }
 
 async function persistOrderStatusToSupabase(client, order, rowsChanged, changedRowIds = []) {
   if (!order?.id) throw new Error("تعذر تحديث الحالة لأن معرّف الطلب غير متاح.");
-  const receiptRows = receiptRowsForPersistence(order, rowsChanged, changedRowIds).map((row) => ({
-    id: row.id,
-    received_quantity: databaseNumber(row.receivedQuantity, 0),
-    receipt_history: normalizeReceiptHistory(row.receiptHistory)
-  }));
-  const result = await client.rpc("apply_order_receipt_status", {
-    p_order_id: order.id,
-    p_document_id: order.documentId || null,
-    p_status: normalizeOrderStatus(order.status),
-    p_collected_pieces: databaseNumber(order.collectedPieces, 0),
-    p_rows: receiptRows
-  });
+  const result = rowsChanged
+    ? await client.rpc("apply_order_receipts", {
+      p_order_id: order.id,
+      p_collected_pieces: databaseNumber(order.collectedPieces, 0),
+      p_rows: receiptRowsForPersistence(order, true, changedRowIds).map((row) => ({
+        id: row.id,
+        received_quantity: databaseNumber(row.receivedQuantity, 0),
+        receipt_history: normalizeReceiptHistory(row.receiptHistory)
+      })),
+      p_app_version: VERSION,
+      p_client_type: Capacitor.getPlatform()
+    })
+    : await client.rpc("update_order_status", {
+      p_order_id: order.id,
+      p_document_id: order.documentId || null,
+      p_status: normalizeOrderStatus(order.status),
+      p_app_version: VERSION,
+      p_client_type: Capacitor.getPlatform()
+    });
   if (result.error) throw result.error;
   return order;
 }
@@ -4287,6 +4331,7 @@ async function saveOrderToSupabase(client, normalized) {
       }
     }
     const orderId = existingId || normalizedOrderId;
+    const rows = normalized.rows.map((row, index) => supabaseOrderRowPayload(row, index, orderId));
     const payload = {
       id: orderId,
       order_no: candidateOrderNo,
@@ -4304,9 +4349,11 @@ async function saveOrderToSupabase(client, normalized) {
       code: normalized.code,
       notes: normalized.notes,
       deleted_row_ids: (normalized.deletedRowIds || []).map(String),
+      expected_item_count: rows.length,
+      app_version: VERSION,
+      client_type: Capacitor.getPlatform(),
       totals: orderTotals(normalized)
     };
-    const rows = normalized.rows.map((row, index) => supabaseOrderRowPayload(row, index, orderId));
     // Header save, row updates/inserts, and removed-row pruning must either all
     // commit or all roll back. This path is also used by persisted Undo restore.
     persistenceStage = {
@@ -4327,6 +4374,7 @@ async function saveOrderToSupabase(client, normalized) {
       p_rows: rows
     });
     if (!result.error) {
+      verifyOrderSaveIntegrity(result.data, rows);
       saved = result;
       savedRows = rows;
       normalized.orderNo = candidateOrderNo;
@@ -5656,22 +5704,6 @@ function App() {
         status: normalizeOrderStatus(scalarStatusPatch.status || currentOrder.status || order.status),
         _existingOrder: true
       };
-      if (!["pricing", "cancelled", "draft"].includes(nextOrder.status)) {
-        const receipt = orderReceiptSummary(nextOrder);
-        const derivedStatus = receipt.receiptStatus === RECEIPT_STATUS.FULLY_RECEIVED
-          ? "collected"
-          : receipt.receiptStatus === RECEIPT_STATUS.PARTIAL
-            ? "partial"
-            : ["partial", "collected"].includes(nextOrder.status)
-              ? "ordered"
-              : nextOrder.status;
-        nextOrder = {
-          ...nextOrder,
-          collectedPieces: receipt.receivedQuantity,
-          receiptStatus: receipt.receiptStatus,
-          status: derivedStatus
-        };
-      }
       historyEntry = pushAppHistory("تحديث حالة طلب", {
         force: true,
         dataSnapshot: latestData,
@@ -11570,6 +11602,7 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
   const [documentDrafts, setDocumentDrafts] = useState({});
   const [receiptDialogOrder, setReceiptDialogOrder] = useState(null);
   const [receiptCorrectionTarget, setReceiptCorrectionTarget] = useState(null);
+  const [pendingWorkflowChange, setPendingWorkflowChange] = useState(null);
   const selectedSupplierSet = useMemo(() => new Set(selectedSuppliers), [selectedSuppliers]);
   const selectedStatusSet = useMemo(() => new Set(selectedStatuses), [selectedStatuses]);
   const canViewCosts = canCurrentUserViewCosts(currentUser);
@@ -11648,28 +11681,31 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
   }
 
   function setSpecialStatus(order, enabled, status) {
-    if (status === "collected") {
-      const totalPieces = orderReceiptSummary(order).orderedQuantity;
-      updateStatus(order, applyAbsoluteOrderReceiptPatch(order, enabled ? totalPieces : 0, currentUser));
-      return;
-    }
-    updateStatus(order, { status: enabled ? status : "ordered" });
+    changeWorkflowStatus(order, enabled ? status : "ordered");
   }
 
   function setCollectedPieces(order, value) {
     updateStatus(order, applyAbsoluteOrderReceiptPatch(order, value, currentUser));
   }
 
+  function persistWorkflowStatus(order, nextStatus) {
+    if (selectedStatuses.length > 0 && !selectedStatusSet.has(nextStatus)) {
+      setSelectedStatuses((current) => [...new Set([...current, nextStatus])]);
+    }
+    return updateStatus(order, { status: nextStatus });
+  }
+
   function changeWorkflowStatus(order, nextStatus) {
-    if (nextStatus === "collected") {
-      setSpecialStatus(order, true, "collected");
+    const receipt = orderReceiptSummary(order);
+    if (nextStatus === "collected" && receipt.remainingQuantity > 0) {
+      setPendingWorkflowChange({
+        order,
+        nextStatus,
+        remainingQuantity: receipt.remainingQuantity
+      });
       return;
     }
-    if (nextStatus === "partial" && orderGlassTypeGroups(order).length > 1) {
-      setReceiptDialogOrder(order);
-      return;
-    }
-    updateStatus(order, { status: nextStatus });
+    persistWorkflowStatus(order, nextStatus);
   }
 
   async function confirmMultiGlassReceipt(order, rowBatch) {
@@ -11959,6 +11995,74 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
           }}
         />
       )}
+      {pendingWorkflowChange && (
+        <WorkflowStatusConfirmationDialog
+          order={pendingWorkflowChange.order}
+          nextStatus={pendingWorkflowChange.nextStatus}
+          remainingQuantity={pendingWorkflowChange.remainingQuantity}
+          onCancel={() => setPendingWorkflowChange(null)}
+          onConfirm={async () => {
+            const saved = await persistWorkflowStatus(
+              pendingWorkflowChange.order,
+              pendingWorkflowChange.nextStatus
+            );
+            if (saved) setPendingWorkflowChange(null);
+            return saved;
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function WorkflowStatusConfirmationDialog({ order, nextStatus, remainingQuantity, onCancel, onConfirm }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const saved = await onConfirm();
+      if (!saved) setError("تعذر تحديث الحالة. لم تتغير بيانات الاستلام ويمكنك المحاولة مرة أخرى.");
+    } catch (submitError) {
+      setError(safeErrorMessage(submitError));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="receipt-dialog-layer" role="presentation" onMouseDown={() => !busy && onCancel()}>
+      <section
+        className="receipt-dialog workflow-status-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workflow-status-confirmation-title"
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !busy) onCancel();
+        }}
+      >
+        <div className="receipt-dialog-head">
+          <div>
+            <h2 id="workflow-status-confirmation-title">تأكيد تغيير حالة الطلب</h2>
+            <p>الطلب: <bdi dir="ltr">{displayOrderNo(order.orderNo)}</bdi></p>
+          </div>
+          <button type="button" className="icon-button" disabled={busy} onClick={onCancel} aria-label="إلغاء"><XCircle size={20} /></button>
+        </div>
+        <div className="workflow-status-warning">
+          <strong>الحالة الجديدة: {statusLabel(nextStatus)}</strong>
+          <span>ما زال هناك {money(remainingQuantity)} من الكمية المطلوبة لم يُسجل استلامها.</span>
+          <p>سيتم تغيير حالة الطلب فقط، ولن تتغير كميات الاستلام أو صفوف الطلب.</p>
+        </div>
+        {error && <div className="receipt-dialog-errors" role="alert"><p>{error}</p></div>}
+        <div className="receipt-dialog-actions">
+          <button type="button" disabled={busy} autoFocus onClick={submit}>{busy ? "جاري الحفظ..." : "تأكيد تغيير الحالة"}</button>
+          <button type="button" className="secondary" disabled={busy} onClick={onCancel}>إلغاء</button>
+        </div>
+      </section>
     </div>
   );
 }

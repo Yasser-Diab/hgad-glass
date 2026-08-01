@@ -39,6 +39,8 @@ const DEFAULT_BOT_SETTINGS = {
   startHiddenAtLogin: true
 };
 const appIconPath = path.join(root, "icons", "app-icon.png");
+const appIconIcoPath = path.join(root, "icons", "app-icon.ico");
+const windowIconPath = process.platform === "win32" ? appIconIcoPath : appIconPath;
 const trayIconPath = path.join(root, "icons", "tray-icon.png");
 const windowStatePath = path.join(app.getPath("userData"), "window-state.json");
 const offlineQueuePath = path.join(app.getPath("userData"), "offline-queue.json");
@@ -48,6 +50,9 @@ const shutdownLogPath = path.join(app.getPath("userData"), "shutdown.log");
 const BROWSER_SERVER_HOST = "127.0.0.1";
 const BROWSER_SERVER_PORT = 5174;
 const BROWSER_SERVER_URL = `http://${BROWSER_SERVER_HOST}:${BROWSER_SERVER_PORT}/`;
+
+app.setName("Y.D Glass Manager");
+if (process.platform === "win32") app.setAppUserModelId("com.hgad.glassorders");
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -1266,7 +1271,7 @@ function createWindow(options = {}) {
     minHeight: 720,
     backgroundColor: "#07080b",
     title: "Y.D Glass Manager",
-    icon: appIconPath,
+    icon: windowIconPath,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -1321,8 +1326,6 @@ function createWindow(options = {}) {
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;
   const hiddenLaunch = shouldLaunchHidden();
-  app.setName("Y.D Glass Manager");
-  if (process.platform === "win32") app.setAppUserModelId("com.hgad.glassorders");
   registerAuthRecoveryProtocol();
   createApplicationMenu();
   createWindow({ show: pendingAuthRecoveryUrl ? true : !hiddenLaunch });
