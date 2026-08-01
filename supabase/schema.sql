@@ -539,8 +539,11 @@ alter default privileges in schema public revoke execute on functions from publi
 -- receipt rows changed by a multi-type receipt or receipt correction. The
 -- function locks the order and validates row ownership, quantities, history
 -- shape, collected total, and receipt-derived status before changing anything.
+drop function if exists public.apply_order_receipt_status(uuid, text, text, numeric, jsonb);
+drop function if exists public.apply_order_receipt_status(text, text, text, numeric, jsonb);
+
 create or replace function public.apply_order_receipt_status(
-  p_order_id uuid,
+  p_order_id public.glass_orders.id%type,
   p_document_id text,
   p_status text,
   p_collected_pieces numeric,
@@ -639,7 +642,7 @@ begin
   if incoming_count > 0 then
     with incoming as (
       select
-        (item ->> 'id')::uuid as id,
+        item ->> 'id' as id,
         (item ->> 'received_quantity')::numeric as received_quantity,
         item -> 'receipt_history' as receipt_history
       from jsonb_array_elements(p_rows) as source(item)
@@ -649,7 +652,7 @@ begin
         receipt_history = incoming.receipt_history,
         updated_at = now()
     from incoming
-    where target.id = incoming.id
+    where target.id::text = incoming.id
       and target.order_id = p_order_id;
   end if;
 
@@ -711,9 +714,9 @@ begin
 end;
 $$;
 
-revoke all on function public.apply_order_receipt_status(uuid, text, text, numeric, jsonb)
+revoke all on function public.apply_order_receipt_status(public.glass_orders.id%type, text, text, numeric, jsonb)
   from public, anon;
-grant execute on function public.apply_order_receipt_status(uuid, text, text, numeric, jsonb)
+grant execute on function public.apply_order_receipt_status(public.glass_orders.id%type, text, text, numeric, jsonb)
   to authenticated;
 
 -- Preserve hidden supplier pricing when a user may edit operational fields but
@@ -860,12 +863,14 @@ as $$
 declare
   order_exists boolean := false;
   row_exists boolean := false;
-  order_id_value uuid;
+  order_id_value public.glass_orders.id%type;
   order_no_value text;
-  existing_row_order_id uuid;
+  customer_id_value public.glass_orders.customer_id%type;
+  supplier_id_value public.glass_orders.supplier_id%type;
+  existing_row_order_id public.glass_order_rows.order_id%type;
   row_value jsonb;
-  row_id_value uuid;
-  saved_row_ids uuid[] := '{}'::uuid[];
+  row_id_value public.glass_order_rows.id%type;
+  saved_row_ids text[] := '{}'::text[];
   saved_row_count integer := 0;
   pruned_row_count integer := 0;
 begin
@@ -887,10 +892,10 @@ begin
   end if;
 
   begin
-    order_id_value := coalesce(
-      nullif(trim(coalesce(p_order ->> 'id', '')), '')::uuid,
-      gen_random_uuid()
-    );
+    order_id_value := nullif(trim(coalesce(p_order ->> 'id', '')), '');
+    if order_id_value is null then
+      order_id_value := gen_random_uuid()::text;
+    end if;
   exception
     when invalid_text_representation then
       raise exception 'Order ID must be a valid UUID.'
@@ -906,6 +911,14 @@ begin
     raise exception 'Order date is required.'
       using errcode = '22023';
   end if;
+  begin
+    customer_id_value := nullif(trim(coalesce(p_order ->> 'customer_id', '')), '');
+    supplier_id_value := nullif(trim(coalesce(p_order ->> 'supplier_id', '')), '');
+  exception
+    when invalid_text_representation then
+      raise exception 'Customer and supplier IDs must match their database identifier types.'
+        using errcode = '22023';
+  end;
   if p_order ? 'collected_pieces'
     and jsonb_typeof(p_order -> 'collected_pieces') is distinct from 'number'
   then
@@ -928,8 +941,8 @@ begin
         status = coalesce(nullif(p_order ->> 'status', ''), 'draft'),
         collected_pieces = coalesce((p_order ->> 'collected_pieces')::numeric, 0),
         entry_mode = coalesce(nullif(p_order ->> 'entry_mode', ''), 'normal'),
-        customer_id = nullif(trim(coalesce(p_order ->> 'customer_id', '')), '')::uuid,
-        supplier_id = nullif(trim(coalesce(p_order ->> 'supplier_id', '')), '')::uuid,
+        customer_id = customer_id_value,
+        supplier_id = supplier_id_value,
         customer_name = p_order ->> 'customer_name',
         supplier_name = p_order ->> 'supplier_name',
         project = p_order ->> 'project',
@@ -966,8 +979,8 @@ begin
       coalesce(nullif(p_order ->> 'status', ''), 'draft'),
       coalesce((p_order ->> 'collected_pieces')::numeric, 0),
       coalesce(nullif(p_order ->> 'entry_mode', ''), 'normal'),
-      nullif(trim(coalesce(p_order ->> 'customer_id', '')), '')::uuid,
-      nullif(trim(coalesce(p_order ->> 'supplier_id', '')), '')::uuid,
+      customer_id_value,
+      supplier_id_value,
       p_order ->> 'customer_name',
       p_order ->> 'supplier_name',
       p_order ->> 'project',
@@ -991,7 +1004,7 @@ begin
         using errcode = '22023';
     end if;
     begin
-      row_id_value := nullif(trim(coalesce(row_value ->> 'id', '')), '')::uuid;
+      row_id_value := nullif(trim(coalesce(row_value ->> 'id', '')), '');
     exception
       when invalid_text_representation then
         raise exception 'Each order row ID must be a valid UUID.'
@@ -1001,7 +1014,7 @@ begin
       raise exception 'Each order row requires an ID.'
         using errcode = '22023';
     end if;
-    if row_id_value = any(saved_row_ids) then
+    if row_id_value::text = any(saved_row_ids) then
       raise exception 'Order rows contain a duplicate row ID.'
         using errcode = '22023';
     end if;
@@ -1121,13 +1134,13 @@ begin
       );
     end if;
 
-    saved_row_ids := array_append(saved_row_ids, row_id_value);
+    saved_row_ids := array_append(saved_row_ids, row_id_value::text);
     saved_row_count := saved_row_count + 1;
   end loop;
 
   delete from public.glass_order_rows
   where order_id = order_id_value
-    and not (id = any(saved_row_ids));
+    and not (id::text = any(saved_row_ids));
   get diagnostics pruned_row_count = row_count;
 
   return jsonb_build_object(

@@ -406,6 +406,15 @@ function uuidOrNew(value) {
     : uid();
 }
 
+function nullableIdentifier(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized || null;
+}
+
+function persistentIdentifier(value) {
+  return nullableIdentifier(value) || uid();
+}
+
 function numberValue(value, fallback = 0) {
   const n = Number(String(value ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : fallback;
@@ -674,7 +683,28 @@ function friendlySaveError(error) {
   if (isSupabaseSchemaCacheError(error)) {
     return "تعذر الحفظ لأن قاعدة البيانات تحتاج تحديثاً. لم يتم فقد أي من البيانات المدخلة.";
   }
-  return safeErrorMessage(error);
+  const technicalMessage = safeErrorMessage(error);
+  if (
+    error?.code
+    || /operator does not exist|invalid input syntax.*uuid|text\s*=\s*uuid|uuid\s*=\s*text/i.test(technicalMessage)
+  ) {
+    return "تعذر حفظ الطلب. لم يتم حذف البيانات المدخلة. برجاء المحاولة مرة أخرى.";
+  }
+  return technicalMessage;
+}
+
+function logSupabasePersistenceError(error, context = {}) {
+  const safeText = (value) => maskSensitiveText(String(value || ""));
+  console.error("[Y.D Glass Manager persistence]", {
+    operation: safeText(context.operation),
+    table: safeText(context.table),
+    function: safeText(context.function),
+    parameters: context.parameters || {},
+    code: safeText(error?.code),
+    message: safeText(error?.message || error),
+    details: safeText(error?.details),
+    hint: safeText(error?.hint)
+  });
 }
 
 function cleanName(value) {
@@ -4140,7 +4170,7 @@ async function nextSupabaseOrderNo(client, floorValue = "") {
 function supabaseOrderRowPayload(row, index, orderId) {
   const totals = rowTotals(row);
   return {
-    id: uuidOrNew(row.id),
+    id: persistentIdentifier(row.id),
     order_id: orderId,
     line_no: index + 1,
     glass_mode: row.glassMode,
@@ -4168,6 +4198,13 @@ function supabaseOrderRowPayload(row, index, orderId) {
 }
 
 async function saveOrderToSupabase(client, normalized) {
+  let persistenceStage = {
+    operation: "resolve parties",
+    table: "customers, suppliers",
+    function: "",
+    parameters: {}
+  };
+  try {
   const customer = await ensureParty(client, "customers", normalized.customerName);
   const supplier = await ensureParty(client, "suppliers", normalized.supplierName);
   const saveAsExisting = normalized._existingOrder === true;
@@ -4180,12 +4217,24 @@ async function saveOrderToSupabase(client, normalized) {
   const validNormalizedOrderId = requestedOrderId === normalizedOrderId ? normalizedOrderId : "";
   let existingId = "";
   if (validNormalizedOrderId) {
+    persistenceStage = {
+      operation: "find order by id",
+      table: "glass_orders",
+      function: "",
+      parameters: { order_id: validNormalizedOrderId }
+    };
     const byId = await client.from("glass_orders").select("id, order_no").eq("id", validNormalizedOrderId).maybeSingle();
     if (byId.error) throw byId.error;
     existingId = byId.data?.id || "";
     if (existingId && byId.data?.order_no) candidateOrderNo = displayOrderNo(byId.data.order_no);
   }
   if (saveAsExisting && !existingId && candidateOrderNo) {
+    persistenceStage = {
+      operation: "find order by number",
+      table: "glass_orders",
+      function: "",
+      parameters: { order_no: candidateOrderNo }
+    };
     const byOrderNo = await client.from("glass_orders").select("id, order_no").eq("order_no", candidateOrderNo).maybeSingle();
     if (byOrderNo.error) throw byOrderNo.error;
     existingId = byOrderNo.data?.id || "";
@@ -4194,6 +4243,12 @@ async function saveOrderToSupabase(client, normalized) {
     throw new Error("تعذر تحديث الطلب لأن السجل الأصلي غير موجود في قاعدة البيانات. لم يتم إنشاء طلب جديد.");
   }
   for (let attempt = 0; attempt < 8; attempt += 1) {
+    persistenceStage = {
+      operation: "check order number",
+      table: "glass_orders",
+      function: "",
+      parameters: { order_no: candidateOrderNo, attempt: attempt + 1 }
+    };
     const duplicate = await client.from("glass_orders").select("id, order_no").eq("order_no", candidateOrderNo).maybeSingle();
     if (duplicate.error) throw duplicate.error;
     if (duplicate.data?.id && duplicate.data.id !== existingId) {
@@ -4219,8 +4274,8 @@ async function saveOrderToSupabase(client, normalized) {
       status: normalized.status,
       collected_pieces: databaseNumber(normalized.collectedPieces, 0),
       entry_mode: normalized.entryMode,
-      customer_id: customer?.id || null,
-      supplier_id: supplier?.id || null,
+      customer_id: nullableIdentifier(customer?.id),
+      supplier_id: nullableIdentifier(supplier?.id),
       customer_name: normalized.customerName,
       supplier_name: normalized.supplierName,
       project: normalized.project,
@@ -4231,6 +4286,19 @@ async function saveOrderToSupabase(client, normalized) {
     const rows = normalized.rows.map((row, index) => supabaseOrderRowPayload(row, index, orderId));
     // Header save, row updates/inserts, and removed-row pruning must either all
     // commit or all roll back. This path is also used by persisted Undo restore.
+    persistenceStage = {
+      operation: "save complete order",
+      table: "glass_orders, glass_order_rows",
+      function: "save_glass_order_atomic",
+      parameters: {
+        order_id: orderId,
+        order_no: candidateOrderNo,
+        customer_id: payload.customer_id,
+        supplier_id: payload.supplier_id,
+        row_count: rows.length,
+        row_ids: rows.map((row) => row.id)
+      }
+    };
     const result = await client.rpc("save_glass_order_atomic", {
       p_order: payload,
       p_rows: rows
@@ -4254,6 +4322,12 @@ async function saveOrderToSupabase(client, normalized) {
   const learnedGaps = [...new Set(normalized.rows.map((row) => cleanName(row.doubleGap)).filter(Boolean))]
     .map((value) => ({ kind: "double_gap", value }));
   if (learnedGaps.length) {
+    persistenceStage = {
+      operation: "save learned glass options",
+      table: "learned_options",
+      function: "",
+      parameters: { option_count: learnedGaps.length }
+    };
     const learnedResult = await client.from("learned_options").upsert(learnedGaps, { onConflict: "kind,value" });
     if (learnedResult.error) throw learnedResult.error;
   }
@@ -4267,6 +4341,10 @@ async function saveOrderToSupabase(client, normalized) {
     })),
     _existingOrder: true
   });
+  } catch (error) {
+    logSupabasePersistenceError(error, persistenceStage);
+    throw error;
+  }
 }
 
 async function deleteOrderFromSupabase(client, order) {
@@ -6471,7 +6549,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   const [invalidRowIndex, setInvalidRowIndex] = useState(null);
   const [activeCell, setActiveCell] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
-  const [editorDraft, setEditorDraft] = useState(null);
   const [selectedRange, setSelectedRange] = useState(null);
   const [selectedRowIds, setSelectedRowIds] = useState([]);
   const [rowContextMenu, setRowContextMenu] = useState(null);
@@ -6489,9 +6566,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   const addRowButtonRef = useRef(null);
   const draftRef = useRef(draft);
   const pendingTableFocusRef = useRef(null);
-  const editorDraftRef = useRef(null);
-  const editorRevisionRef = useRef(0);
-  const directEditRef = useRef({ key: "", value: "", rowId: "", column: "", active: false });
   const rangeDragRef = useRef(null);
   const pointerGestureCleanupRef = useRef(new Set());
   const rowSelectionAnchorRef = useRef(null);
@@ -6725,15 +6799,21 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   }
   function updateRow(index, updater, options = {}) {
     setInvalidRowIndex(null);
-    const rowId = draft.rows[index]?.id || index;
+    const rowId = draft.rows[index]?.id || "";
     rememberRows(draft.rows, {
       label: options.label || "تعديل صف",
       coalesceMs: Object.prototype.hasOwnProperty.call(options, "coalesceMs") ? options.coalesceMs : 700,
-      key: options.key || `row:${rowId}`
+      key: options.key || `row:${rowId || index}`
     });
     setDraft((current) => {
       const rows = [...(current.rows || [])];
-      rows[index] = typeof updater === "function" ? updater(rows[index]) : { ...rows[index], ...updater };
+      const currentRowIndex = rowId
+        ? rows.findIndex((row) => row.id === rowId)
+        : index;
+      if (currentRowIndex < 0 || currentRowIndex >= rows.length) return current;
+      rows[currentRowIndex] = typeof updater === "function"
+        ? updater(rows[currentRowIndex])
+        : { ...rows[currentRowIndex], ...updater };
       return { ...current, rows };
     });
   }
@@ -6768,62 +6848,8 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (options.focus !== false) restoreRendererInputFocus({ select: options.select, caretEnd: options.caretEnd });
     return false;
   }
-  function directEditKey(rowIndex, column) {
-    return `${rowIdAt(rowIndex) || rowIndex}:${column}`;
-  }
-  function setEditorDraftState(nextDraft, options = {}) {
-    editorDraftRef.current = nextDraft;
-    if (options.render !== false) setEditorDraft(nextDraft);
-  }
-  function columnNeedsLiveEditorRender(column = "") {
-    return /^layer\d+-(glassType|company|thickness)$/.test(column) || ["doubleGap", "triplexPvb"].includes(column);
-  }
-  function editorDraftForCell(rowIndex, column) {
-    const current = editorDraftRef.current;
-    if (!current || current.key !== directEditKey(rowIndex, column)) return null;
-    return current;
-  }
-  function cellRenderValue(rowIndex, column, fallback = "") {
-    const current = editorDraftForCell(rowIndex, column);
-    return current ? current.value : fallback;
-  }
-  function readCellDomValue(rowIndex, column) {
-    const target = document.querySelector(tableControlSelector(rowIndex, column));
-    return target && "value" in target ? String(target.value ?? "") : null;
-  }
-  function updateEditorValue(rowIndex, column, value, options = {}) {
-    const nextCell = makeTableCell(rowIndex, column);
-    const revision = editorRevisionRef.current + 1;
-    editorRevisionRef.current = revision;
-    const nextDraft = {
-      key: directEditKey(rowIndex, column),
-      cell: nextCell,
-      rowId: nextCell.rowId,
-      column,
-      value: String(value ?? ""),
-      revision
-    };
-    setEditorDraftState(nextDraft, { render: options.render !== false });
-    return nextDraft;
-  }
-  function setCellDomValue(rowIndex, column, value) {
-    const target = document.querySelector(tableControlSelector(rowIndex, column));
-    if (!target || !("value" in target)) return;
-    target.value = value;
-    try {
-      target.focus?.({ preventScroll: true });
-    } catch {
-      target.focus?.();
-    }
-    if (typeof target.setSelectionRange === "function") {
-      const length = String(value || "").length;
-      target.setSelectionRange(length, length);
-    }
-  }
-  function syncEditorValueFromTarget(target, rowIndex, column) {
-    if (target && "value" in target) {
-      updateEditorValue(rowIndex, column, target.value, { render: false });
-    }
+  function cellRenderValue(_rowIndex, _column, fallback = "") {
+    return fallback;
   }
   function applyEntryCellValueToRow(row, column, value) {
     const result = applyCellValueToRow(row, column, value);
@@ -6862,65 +6888,39 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     }
     return { row: nextRow, ok: true };
   }
-  function commitEditingCell(options = {}) {
-    const current = editorDraftRef.current;
-    const cell = current?.cell || editingCell;
-    if (!cell?.column) {
-      setEditorDraftState(null);
-      setEditingCell(null);
-      directEditRef.current = { key: "", value: "", rowId: "", column: "", active: false };
-      return true;
-    }
-    const rowIndex = rowIndexForCell(cell);
-    if (rowIndex < 0) {
-      setEditorDraftState(null);
-      setEditingCell(null);
-      directEditRef.current = { key: "", value: "", rowId: "", column: "", active: false };
-      return false;
-    }
-    const domValue = readCellDomValue(rowIndex, cell.column);
-    const nextValue = domValue !== null ? domValue : (current?.value ?? readRowCellValue(draft.rows[rowIndex], cell.column));
-    const previousValue = readRowCellValue(draft.rows[rowIndex], cell.column);
-    setEditorDraftState(null);
+  function commitEditingCell() {
     setEditingCell(null);
-    directEditRef.current = { key: "", value: "", rowId: "", column: "", active: false };
-    if (String(previousValue ?? "") !== String(nextValue ?? "")) {
-      setCellValue(rowIndex, cell.column, nextValue, {
-        forceHistory: true,
-        label: options.label || "تعديل خلية",
-        sync: options.sync !== false
-      });
-    }
     return true;
   }
   function handleCellDraftChange(rowIndex, column, value, options = {}) {
-    if (isEditingCell(rowIndex, column) || options.buffer === true) {
-      updateEditorValue(rowIndex, column, value, { render: options.render ?? columnNeedsLiveEditorRender(column) });
-      if (options.commit) commitEditingCell({ sync: true, label: options.label || "تعديل خلية" });
-      return;
-    }
-    setCellValue(rowIndex, column, value, { label: options.label || "تعديل خلية", sync: options.sync });
+    setCellValue(rowIndex, column, value, {
+      label: options.label || "تعديل خلية",
+      remember: options.remember
+    });
+    if (options.commit) setEditingCell(null);
   }
-  function handleCellBlur(rowIndex, column, event) {
+  function handleCellBlur(rowIndex, column) {
     if (isEditingCell(rowIndex, column)) {
-      syncEditorValueFromTarget(event?.target, rowIndex, column);
-      commitEditingCell({ sync: true });
+      setEditingCell(null);
     }
   }
   function setCellValue(rowIndex, column, value, options = {}) {
     setInvalidRowIndex(null);
     if (options.remember !== false) rememberRows(draft.rows, { force: !!options.forceHistory, label: options.label || "تعديل خلية" });
-    const apply = () => setDraft((current) => {
+    const stableRowId = rowIdAt(rowIndex);
+    setDraft((current) => {
       const rows = [...(current.rows || [])];
-      const result = applyEntryCellValueToRow(rows[rowIndex], column, value);
+      const currentRowIndex = stableRowId
+        ? rows.findIndex((row) => row.id === stableRowId)
+        : rowIndex;
+      if (currentRowIndex < 0 || currentRowIndex >= rows.length) return current;
+      const result = applyEntryCellValueToRow(rows[currentRowIndex], column, value);
       if (!result.ok) return current;
-      rows[rowIndex] = result.row;
+      rows[currentRowIndex] = result.row;
       const nextDraft = { ...current, rows };
       draftRef.current = nextDraft;
       return nextDraft;
     });
-    if (options.sync === false) apply();
-    else flushSync(apply);
   }
   function requestRemoveRows(indexes) {
     const unique = [...new Set((Array.isArray(indexes) ? indexes : [indexes]).map(Number))]
@@ -6932,8 +6932,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       else focusAddRowControl();
       return;
     }
-    if (editingCell) commitEditingCell({ sync: true });
-    setEditorDraftState(null);
+    if (editingCell) commitEditingCell();
     setEditingCell(null);
     setRowContextMenu(null);
     setDeleteRowIndexes(unique);
@@ -6998,14 +6997,12 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
         empty: previewRows.length === 0
       };
       setDeleteRowIndexes(null);
-      setEditorDraftState(null);
       setEditingCell(null);
       setActiveCell(null);
       setSelectedRange(null);
       setSelectedRowIds([]);
       rowSelectionAnchorRef.current = null;
       rangeDragRef.current = null;
-      directEditRef.current = { key: "", value: "", rowId: "", column: "", active: false };
       setInvalidRowIndex(null);
       setEntryRowHeights((current) => {
         const next = { ...current };
@@ -7195,8 +7192,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   function focusTableCell(rowIndex, column, options = {}) {
     const nextCell = makeTableCell(rowIndex, column);
     setEditingCell(null);
-    setEditorDraftState(null);
-    directEditRef.current = { key: "", value: "", rowId: "", column: "", active: false };
     setSelectionToCell(nextCell, options);
     window.__glassSmartTableNavAt = Date.now();
     window.setTimeout(() => {
@@ -7210,55 +7205,23 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const nextCell = makeTableCell(rowIndex, cell.column);
     const hasInitialText = Object.prototype.hasOwnProperty.call(options, "initialText");
     const initialText = hasInitialText ? String(options.initialText ?? "") : String(readRowCellValue(draft.rows[rowIndex], cell.column) ?? "");
-    const editKey = directEditKey(rowIndex, cell.column);
+    setSelectedRowIds([]);
+    setActiveCell(nextCell);
+    setSelectedRange({ anchor: nextCell, focus: nextCell });
+    setEditingCell(nextCell);
     if (hasInitialText) {
-      directEditRef.current = { key: editKey, value: initialText, rowId: nextCell.rowId, column: cell.column, active: true };
+      setCellValue(rowIndex, cell.column, initialText, {
+        forceHistory: true,
+        label: "تعديل خلية"
+      });
     }
-    const revision = editorRevisionRef.current + 1;
-    editorRevisionRef.current = revision;
-    const nextDraft = {
-      key: editKey,
-      cell: nextCell,
-      rowId: nextCell.rowId,
-      column: cell.column,
-      value: initialText,
-      revision
-    };
-    flushSync(() => {
-      setSelectedRowIds([]);
-      setActiveCell(nextCell);
-      setSelectedRange({ anchor: nextCell, focus: nextCell });
-      setEditingCell(nextCell);
-      setEditorDraftState(nextDraft);
+    window.requestAnimationFrame(() => {
+      focusEntryTableControl(rowIndex, cell.column, 0, {
+        exact: true,
+        select: false,
+        caretEnd: true
+      });
     });
-    focusEntryTableControl(rowIndex, cell.column, 0, { exact: true, select: false, caretEnd: true });
-    setCellDomValue(rowIndex, cell.column, initialText);
-    window.setTimeout(() => {
-      const pending = directEditRef.current;
-      if (pending.key !== editKey || !pending.active) return;
-      focusEntryTableControl(rowIndex, cell.column, 0, { exact: true, select: false, caretEnd: true });
-      setCellDomValue(rowIndex, cell.column, pending.value);
-    }, 0);
-    window.setTimeout(() => {
-      if (directEditRef.current.key === editKey) {
-        directEditRef.current = { key: "", value: "", rowId: "", column: "", active: false };
-      }
-    }, 1400);
-  }
-  function appendDirectEditKey(rowIndex, column, key) {
-    const editKey = directEditKey(rowIndex, column);
-    const pending = directEditRef.current;
-    if (!pending.active || pending.key !== editKey) return false;
-    const nextValue = `${pending.value || ""}${key}`;
-    directEditRef.current = { ...pending, value: nextValue };
-    updateEditorValue(rowIndex, column, nextValue, { render: false });
-    setCellDomValue(rowIndex, column, nextValue);
-    window.setTimeout(() => {
-      if (directEditRef.current.key === editKey && directEditRef.current.value === nextValue) {
-        directEditRef.current = { key: "", value: "", rowId: "", column: "", active: false };
-      }
-    }, 1400);
-    return true;
   }
   function selectedColumnDefinitionIndexes(kind, fallbackIndex) {
     const bounds = tableRangeBounds();
@@ -7361,6 +7324,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const nextCell = makeTableCell(rowIndex, column);
     setSelectedRowIds([]);
     setActiveCell(nextCell);
+    setEditingCell(nextCell);
     setSelectedRange((current) => {
       if (event?.shiftKey && current?.anchor) return { anchor: current.anchor, focus: nextCell };
       return { anchor: nextCell, focus: nextCell };
@@ -7397,21 +7361,20 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (event.button !== 0) return;
     const nextCell = makeTableCell(rowIndex, column);
     if (editingCell && !sameTableCell(editingCell, nextCell)) {
-      commitEditingCell({ sync: true });
+      commitEditingCell();
     }
-    if (sameTableCell(activeCell, nextCell) && !isEditingCell(rowIndex, column) && !event.shiftKey) {
-      preventCancelableDefault(event);
-      event.stopPropagation();
-      startEditingCell(nextCell);
+    if (!event.shiftKey) {
+      setSelectedRowIds([]);
+      setActiveCell(nextCell);
+      setSelectedRange({ anchor: nextCell, focus: nextCell });
+      setEditingCell(nextCell);
       return;
     }
-    if (!isEditingCell(rowIndex, column)) {
-      preventCancelableDefault(event);
-      event.stopPropagation();
-      setEditingCell(null);
-      beginRangeDrag(rowIndex, column, event);
-      focusTableShell();
-    }
+    preventCancelableDefault(event);
+    event.stopPropagation();
+    setEditingCell(null);
+    beginRangeDrag(rowIndex, column, event);
+    focusTableShell();
   }
   function columnForRowNear(rowIndex, column, fallbackColumnIndex = 0) {
     if (columnExistsInRow(rowIndex, column)) return column;
@@ -7452,8 +7415,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const destination = findCtrlArrowDestination(activeCell, direction);
     if (!destination) return false;
     setEditingCell(null);
-    setEditorDraftState(null);
-    directEditRef.current = { key: "", value: "", rowId: "", column: "", active: false };
     setSelectionToCell(destination, { extend: extendSelection });
     window.__glassSmartTableNavAt = Date.now();
     window.setTimeout(() => {
@@ -7598,7 +7559,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       draftSnapshot: sourceDraft
     });
     setInvalidRowIndex(null);
-    setEditorDraftState(null);
     setEditingCell(null);
     setSelectedRowIds([]);
     setDraft((current) => {
@@ -7713,29 +7673,8 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const rowIndex = rowIndexForCell(sourceCell);
     const column = sourceCell?.column;
     if (!Number.isInteger(rowIndex) || rowIndex < 0 || !column) return;
-    if (!target && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1 && appendDirectEditKey(rowIndex, column, event.key)) {
-      preventCancelableDefault(event);
-      event.stopPropagation();
-      return;
-    }
     if (target?.closest(".combo.open") && !(event.ctrlKey || event.metaKey) && ["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key)) return;
     const editing = isEditingCell(rowIndex, column);
-    if (!editing && event.key === "Delete" && selectedRowIds.length) {
-      preventCancelableDefault(event);
-      event.stopPropagation();
-      requestRemoveRows(selectedRowIndexes());
-      return;
-    }
-    if (event.key === "Escape") {
-      if (editing) {
-        preventCancelableDefault(event);
-        event.stopPropagation();
-        setEditorDraftState(null);
-        setEditingCell(null);
-        focusTableCell(rowIndex, column);
-      }
-      return;
-    }
     const shortcutModifier = event.ctrlKey || event.metaKey;
     const arrowDirection = event.key === "ArrowDown"
       ? "down"
@@ -7750,10 +7689,34 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       preventCancelableDefault(event);
       event.stopPropagation();
     };
-    const commitEditorForKey = () => {
-      if (target) syncEditorValueFromTarget(target, rowIndex, column);
-      commitEditingCell({ sync: true });
-    };
+    if (target && isEditableDomTarget(target)) {
+      if (event.key === "Tab") {
+        claimKey();
+        setEditingCell(null);
+        moveFromCell(rowIndex, column, 0, event.shiftKey ? -1 : 1, false, { allowAddRow: false });
+      } else if (event.key === "Enter") {
+        claimKey();
+        event.__glassTableHandled = true;
+        if (event.nativeEvent) event.nativeEvent.__glassTableHandled = true;
+        setEditingCell(null);
+        moveFromCell(rowIndex, column, 1, 0, false, { allowAddRow: true });
+      }
+      return;
+    }
+    if (!editing && event.key === "Delete" && selectedRowIds.length) {
+      claimKey();
+      requestRemoveRows(selectedRowIndexes());
+      return;
+    }
+    if (event.key === "Escape") {
+      if (editing) {
+        claimKey();
+        setEditingCell(null);
+        focusTableCell(rowIndex, column);
+      }
+      return;
+    }
+    const commitEditorForKey = () => commitEditingCell();
     if (shortcutModifier && !event.shiftKey && event.key.toLowerCase() === "z") {
       claimKey();
       if (event.repeat) return;
@@ -7852,9 +7815,10 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (!eventTarget?.closest?.(".table-control") && isEditableDomTarget(eventTarget)) return;
     const text = event.clipboardData?.getData("text/plain") || "";
     if (!text) return;
+    if (isEditableDomTarget(eventTarget) && !/[\t\r\n]/.test(text)) return;
     if (selectedRowIds.length) {
       preventCancelableDefault(event);
-      if (editingCell) commitEditingCell({ sync: true });
+      if (editingCell) commitEditingCell();
       pasteIntoSelectedRows(text);
       return;
     }
@@ -7862,7 +7826,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const startCell = target ? { row: Number(target.dataset.row), rowId: target.dataset.rowId || "", column: target.dataset.col } : activeCell;
     if (startCell?.column) {
       preventCancelableDefault(event);
-      if (editingCell) commitEditingCell({ sync: true });
+      if (editingCell) commitEditingCell();
       applyTableMatrixPaste(text, startCell);
       return;
     }
@@ -7889,13 +7853,10 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   async function commitActiveEditorBeforeAction() {
     const active = document.activeElement;
     if (active?.classList?.contains("table-control")) {
-      const rowIndex = Number(active.dataset.row);
-      const column = active.dataset.col;
-      if (Number.isInteger(rowIndex) && column) syncEditorValueFromTarget(active, rowIndex, column);
-      commitEditingCell({ sync: true });
+      commitEditingCell();
       active.blur?.();
     } else {
-      commitEditingCell({ sync: true });
+      commitEditingCell();
     }
     await waitForPaint(0);
   }
@@ -8285,6 +8246,7 @@ function DrawingFocusEditor({ row, index, updateRow, onClose }) {
 function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptions, smartOptions, priceHistory, drawingEnabled, updateRow, addRow, removeRow, copyFullRow, copyToFollowingRows, hasFollowingRows, invalid = false, selectedRow = false, isCellActive = () => false, isCellSelected = () => false, isCellEditing = () => false, cellValue = (_rowIndex, _column, fallback) => fallback, onCellValueChange = () => {}, onCellBlur = () => {}, onRowSelect = () => {}, onRowContextMenu = () => {}, onCellFocus = () => {}, onCellPointerDown = () => {}, onCellCommitMove = () => {}, onCopyDownCell = () => {}, onRowResize = () => {}, onLearnTableOption = () => {} }) {
   const totals = rowTotals(row);
   const hasLayerSizeDifference = rowHasLayerSizeDifference(row);
+  const composingCellRef = useRef("");
   const tableCellProps = (column) => {
     const classes = ["table-control"];
     if (isCellSelected(index, column)) classes.push("selected-cell");
@@ -8299,7 +8261,16 @@ function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptio
       tabIndex: isCellEditing(index, column) ? 0 : -1,
       onFocus: (event) => onCellFocus(index, column, event),
       onPointerDown: (event) => onCellPointerDown(index, column, event),
-      onBlur: (event) => onCellBlur(index, column, event)
+      onBlur: (event) => onCellBlur(index, column, event),
+      onCompositionStart: () => {
+        composingCellRef.current = column;
+      },
+      onCompositionEnd: (event) => {
+        composingCellRef.current = "";
+        if ("value" in event.currentTarget) {
+          onCellValueChange(index, column, event.currentTarget.value, { remember: false });
+        }
+      }
     };
   };
   function optionKindForColumn(column) {

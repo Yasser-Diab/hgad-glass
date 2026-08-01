@@ -63,7 +63,9 @@ test("migration and authoritative schema expose the same secured transaction", (
   assert.match(migrationSource, /if order_exists then[\s\S]*update public\.glass_orders[\s\S]*else[\s\S]*insert into public\.glass_orders/);
   assert.match(migrationSource, /if row_exists then[\s\S]*update public\.glass_order_rows[\s\S]*else[\s\S]*insert into public\.glass_order_rows/);
   assert.match(migrationSource, /existing_row_order_id <> order_id_value/);
-  assert.match(migrationSource, /delete from public\.glass_order_rows[\s\S]*not \(id = any\(saved_row_ids\)\)/);
+  assert.match(migrationSource, /delete from public\.glass_order_rows[\s\S]*not \(id::text = any\(saved_row_ids\)\)/);
+  assert.match(migrationSource, /order_id_value public\.glass_orders\.id%type/);
+  assert.match(migrationSource, /row_id_value public\.glass_order_rows\.id%type/);
   assert.doesNotMatch(migrationSource, /on conflict/i);
   assert.match(migrationSource, /revoke all on function public\.save_glass_order_atomic\(jsonb, jsonb\)[\s\S]*from public, anon/);
   assert.match(migrationSource, /grant execute on function public\.save_glass_order_atomic\(jsonb, jsonb\)[\s\S]*to authenticated/);

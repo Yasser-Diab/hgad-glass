@@ -43,13 +43,19 @@ if ($installer) {
   Write-Host "No Windows installer found yet. Run npm run dist:win first to include it."
 }
 
-$apks = Get-ChildItem -Path (Join-Path $root "dist-android") -Filter "YDGlassManager-*$version.apk" -Recurse -ErrorAction SilentlyContinue | Sort-Object Name
-if ($apks) {
+$apkNames = @(
+  "YDGlassManager-Full-$version.apk",
+  "YDGlassManager-OrderStatus-$version.apk"
+)
+$apks = @($apkNames | ForEach-Object {
+  Get-Item -LiteralPath (Join-Path $root "dist-android\$_") -ErrorAction SilentlyContinue
+})
+if ($apks.Count -eq $apkNames.Count) {
   foreach ($apk in $apks) {
     Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $releaseDir $apk.Name) -Force
   }
 } else {
-  Write-Host "No Android APK found yet. Run npm run android:release first to include it."
+  throw "Expected Android release APKs are missing. Run npm run android:release first."
 }
 
 $zipPath = Join-Path $releaseRoot "YDGlassManager_V$version`_release.zip"

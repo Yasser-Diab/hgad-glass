@@ -1,7 +1,10 @@
 -- Atomically persist order status and selected receipt-row changes.
 -- Depends on 20260729151648_harden_auth_rls_and_cost_access.sql.
+drop function if exists public.apply_order_receipt_status(uuid, text, text, numeric, jsonb);
+drop function if exists public.apply_order_receipt_status(text, text, text, numeric, jsonb);
+
 create or replace function public.apply_order_receipt_status(
-  p_order_id uuid,
+  p_order_id public.glass_orders.id%type,
   p_document_id text,
   p_status text,
   p_collected_pieces numeric,
@@ -100,7 +103,7 @@ begin
   if incoming_count > 0 then
     with incoming as (
       select
-        (item ->> 'id')::uuid as id,
+        item ->> 'id' as id,
         (item ->> 'received_quantity')::numeric as received_quantity,
         item -> 'receipt_history' as receipt_history
       from jsonb_array_elements(p_rows) as source(item)
@@ -110,7 +113,7 @@ begin
         receipt_history = incoming.receipt_history,
         updated_at = now()
     from incoming
-    where target.id = incoming.id
+    where target.id::text = incoming.id
       and target.order_id = p_order_id;
   end if;
 
@@ -172,7 +175,7 @@ begin
 end;
 $$;
 
-revoke all on function public.apply_order_receipt_status(uuid, text, text, numeric, jsonb)
+revoke all on function public.apply_order_receipt_status(public.glass_orders.id%type, text, text, numeric, jsonb)
   from public, anon;
-grant execute on function public.apply_order_receipt_status(uuid, text, text, numeric, jsonb)
+grant execute on function public.apply_order_receipt_status(public.glass_orders.id%type, text, text, numeric, jsonb)
   to authenticated;
