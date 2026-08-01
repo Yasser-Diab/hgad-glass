@@ -740,6 +740,26 @@ textarea { min-height: 96px; resize: vertical; }
 }
 .field { position: relative; display: grid; gap: 6px; min-width: 0; overflow: visible; }
 .field span { color: var(--muted); font-size: 13px; }
+.field.invalid-field > span { color: #ef4444; font-weight: 700; }
+.field.invalid-field input,
+.field.invalid-field select {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, .18);
+}
+.order-validation-summary {
+  display: grid;
+  gap: 5px;
+  margin: -2px 0 14px;
+  padding: 11px 13px;
+  border: 1px solid rgba(239, 68, 68, .72);
+  border-radius: 8px;
+  background: color-mix(in srgb, #ef4444 11%, var(--surface));
+  color: var(--body-font-color);
+}
+.order-validation-summary strong { color: #ef4444; }
+.order-validation-summary span { color: var(--muted); }
+.order-validation-summary ul { margin: 2px 18px 0 0; padding: 0; }
+.order-validation-summary li { margin: 2px 0; }
 .search-box {
   min-width: min(360px, 100%);
   display: flex;
@@ -1206,6 +1226,12 @@ textarea { min-height: 96px; resize: vertical; }
 .invalid-row .table-control {
   outline-color: rgba(239, 68, 68, .85);
   box-shadow: inset 0 0 0 1px rgba(239, 68, 68, .42);
+}
+.table-control.invalid-cell {
+  outline: 3px solid #ef4444;
+  outline-offset: -3px;
+  background: color-mix(in srgb, #ef4444 14%, var(--field-bg));
+  box-shadow: inset 0 0 0 1px rgba(239, 68, 68, .62);
 }
 .description {
   min-height: 38px;

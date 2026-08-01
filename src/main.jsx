@@ -76,6 +76,12 @@ import {
   normalizePastePreferences
 } from "./pastePipeline.js";
 import {
+  isCompletelyEmptyOrderRow,
+  validateOrderForSave,
+  validateOrderRowForSave,
+  validationErrorKey
+} from "./orderSaveValidation.js";
+import {
   ORDER_STATUS_BY_RECEIPT_STATUS,
   RECEIPT_STATUS,
   ReceiptValidationError,
@@ -2932,6 +2938,10 @@ function createDraft(overrides = {}) {
     ? overrides.entryAt
     : (!overrides.id ? new Date().toISOString() : "");
   const clientDocumentId = overrides.clientDocumentId || overrides.client_document_id || overrides.id || uid();
+  const rows = overrides.rows?.length ? overrides.rows.map(makeRow) : [makeRow()];
+  const originalRowIds = Array.isArray(overrides.originalRowIds)
+    ? overrides.originalRowIds.map(String)
+    : (overrides.id ? rows.map((row) => String(row.id || "")).filter(Boolean) : []);
   return {
     id: overrides.id || "",
     clientDocumentId,
@@ -2942,13 +2952,16 @@ function createDraft(overrides = {}) {
     status: normalizeOrderStatus(overrides.status || "ordered"),
     collectedPieces: numberValue(overrides.collectedPieces),
     entryMode: overrides.entryMode || "normal",
+    customerId: overrides.customerId || overrides.customer_id || "",
     customerName: overrides.customerName || "",
     supplierId: overrides.supplierId || overrides.supplier_id || "",
     supplierName: overrides.supplierName || "",
     project: overrides.project || "",
     code: overrides.code || "",
     notes: overrides.notes || "",
-    rows: overrides.rows?.length ? overrides.rows.map(makeRow) : [makeRow()]
+    originalRowIds,
+    deletedRowIds: Array.isArray(overrides.deletedRowIds) ? overrides.deletedRowIds.map(String) : [],
+    rows
   };
 }
 
@@ -2990,12 +3003,15 @@ function orderSaveSnapshot(order = {}) {
     status: normalizeOrderStatus(cloned.status || "ordered"),
     collectedPieces: databaseNumber(cloned.collectedPieces, 0),
     entryMode: cloned.entryMode || "normal",
+    customerId: cleanName(cloned.customerId || cloned.customer_id),
     customerName: cleanName(cloned.customerName),
-    supplierId: cloned.supplierId || cloned.supplier_id || "",
+    supplierId: cleanName(cloned.supplierId || cloned.supplier_id),
     supplierName: cleanName(cloned.supplierName),
     project: cleanName(cloned.project),
     code: cleanName(cloned.code),
     notes: cloned.notes || "",
+    originalRowIds: Array.isArray(cloned.originalRowIds) ? cloned.originalRowIds.map(String) : [],
+    deletedRowIds: Array.isArray(cloned.deletedRowIds) ? cloned.deletedRowIds.map(String) : [],
     rows: activeOrderRows(cloned.rows || [])
   };
 }
@@ -3451,6 +3467,7 @@ async function localRequest(path, options = {}, timeoutMs = 3500) {
       const payload = await response.json().catch(() => ({}));
       const error = new Error(payload.error || `HTTP ${response.status}`);
       error.code = payload.code || "";
+      error.fields = Array.isArray(payload.fields) ? payload.fields : [];
       error.status = response.status;
       throw error;
     }
@@ -3972,6 +3989,7 @@ async function loadData() {
             status: order.status,
             collectedPieces: order.collected_pieces || order.collectedPieces || 0,
             entryMode: order.entry_mode,
+            customerId: order.customer_id || "",
             customerName: order.customer_name,
             supplierId: order.supplier_id || "",
             supplierName: order.supplier_name,
@@ -4014,7 +4032,11 @@ async function loadData() {
 }
 
 async function saveOrderToStore(order, data) {
-  const normalized = { ...orderSaveSnapshot(order), status: normalizeOrderStatus(order.status), collectedPieces: databaseNumber(order.collectedPieces, 0), customerName: cleanName(order.customerName), supplierName: cleanName(order.supplierName) };
+  const validation = validateOrderForSave(order, { customers: data?.customers || [], suppliers: data?.suppliers || [] });
+  if (!validation.isValid) {
+    throw new Error(validation.errors[0]?.message || "تعذر حفظ الطلب لوجود بيانات مطلوبة غير مكتملة.");
+  }
+  const normalized = { ...orderSaveSnapshot({ ...order, rows: validation.payloadRows }), status: normalizeOrderStatus(order.status), collectedPieces: databaseNumber(order.collectedPieces, 0), customerName: cleanName(order.customerName), supplierName: cleanName(order.supplierName) };
   if (order._existingOrder === true) normalized._existingOrder = true;
   if (localServerEnabled()) {
     try {
@@ -4205,8 +4227,8 @@ async function saveOrderToSupabase(client, normalized) {
     parameters: {}
   };
   try {
-  const customer = await ensureParty(client, "customers", normalized.customerName);
-  const supplier = await ensureParty(client, "suppliers", normalized.supplierName);
+  const customer = await selectedPartyForPersistence(client, "customers", normalized.customerId, normalized.customerName, "العميل");
+  const supplier = await selectedPartyForPersistence(client, "suppliers", normalized.supplierId, normalized.supplierName, "المورد");
   const saveAsExisting = normalized._existingOrder === true;
   const lockedVisibleOrderNo = !!normalized.orderNo;
   let candidateOrderNo = normalized.orderNo ? displayOrderNo(normalized.orderNo) : await nextSupabaseOrderNo(client);
@@ -4281,6 +4303,7 @@ async function saveOrderToSupabase(client, normalized) {
       project: normalized.project,
       code: normalized.code,
       notes: normalized.notes,
+      deleted_row_ids: (normalized.deletedRowIds || []).map(String),
       totals: orderTotals(normalized)
     };
     const rows = normalized.rows.map((row, index) => supabaseOrderRowPayload(row, index, orderId));
@@ -4339,6 +4362,8 @@ async function saveOrderToSupabase(client, normalized) {
       ...row,
       id: savedRows[index]?.id || row.id
     })),
+    originalRowIds: savedRows.map((row) => String(row.id || "")).filter(Boolean),
+    deletedRowIds: [],
     _existingOrder: true
   });
   } catch (error) {
@@ -4425,14 +4450,18 @@ async function savePaymentToSupabase(client, payment) {
   return result;
 }
 
-async function ensureParty(client, table, name) {
-  if (!name) return null;
-  const existing = await client.from(table).select("*").ilike("name", name).limit(1).maybeSingle();
+async function selectedPartyForPersistence(client, table, id, name, label) {
+  const selectedId = cleanName(id);
+  const selectedName = cleanName(name);
+  if (!selectedId || !selectedName) {
+    throw new Error(`يجب اختيار ${label} من القائمة قبل حفظ الطلب.`);
+  }
+  const existing = await client.from(table).select("id, name").eq("id", selectedId).maybeSingle();
   if (existing.error) throw existing.error;
-  if (existing.data) return existing.data;
-  const inserted = await client.from(table).insert({ name }).select().single();
-  if (inserted.error) throw inserted.error;
-  return inserted.data;
+  if (!existing.data || cleanName(existing.data.name).toLocaleLowerCase() !== selectedName.toLocaleLowerCase()) {
+    throw new Error(`اختيار ${label} غير صالح. اختر ${label} مرة أخرى من القائمة.`);
+  }
+  return existing.data;
 }
 
 function upsertLocalParty(list, name) {
@@ -4480,20 +4509,7 @@ function layerHasAnyInput(layer = {}) {
 }
 
 function isCompletelyEmptyRow(row = {}) {
-  return (row.glassMode || "single") === "single" &&
-    !cleanName(row.code) &&
-    !cleanName(row.notes) &&
-    !cleanName(row.quantity) &&
-    !numberValue(row.unitPrice) &&
-    !numberValue(row.supplierUnitPrice) &&
-    !numberValue(row.materialUnitPrice) &&
-    !numberValue(row.supplierMaterialUnitPrice) &&
-    !cleanName(row.doubleGap) &&
-    !cleanName(row.triplexPvb) &&
-    !(row.layers || []).some(layerHasAnyInput) &&
-    !(row.drawing?.shapes || []).length &&
-    !(row.drawing?.paths || []).length &&
-    !rowStoredPanels(row).length;
+  return isCompletelyEmptyOrderRow(row);
 }
 
 function isRecoverableEmptyOrderRecord(order = {}) {
@@ -4506,91 +4522,21 @@ function requiredLayerCount(row = {}) {
 
 function validateOrderRows(order = {}) {
   const rows = order.rows || [];
-  if (!rows.length) {
-    return {
-      ok: false,
-      message: "لا يمكن حفظ الطلب قبل إدخال توصيف الزجاج وإكمال بيانات بند واحد على الأقل.",
+  const errors = rows.flatMap((row, rowIndex) => validateOrderRowForSave(row, rowIndex));
+  const meaningfulRows = rows.filter((row) => !isCompletelyEmptyOrderRow(row));
+  if (!meaningfulRows.length) {
+    errors.push({
+      scope: "row",
+      rowId: rows[0]?.id || "local-row-0",
       rowIndex: 0,
-      column: "layer0-glassType"
-    };
+      field: "layer0-glassType",
+      message: "الصف 1: يجب إدخال بند زجاج مكتمل واحد على الأقل."
+    });
   }
-  let validRows = 0;
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-    const row = rows[rowIndex] || makeRow();
-    if (isCompletelyEmptyRow(row)) {
-      continue;
-    }
-    const layers = normalizeLayers(row.glassMode || "single", row.layers || []);
-    for (let layerIndex = 0; layerIndex < requiredLayerCount(row); layerIndex += 1) {
-      const layer = layers[layerIndex] || {};
-      if (!cleanName(layer.glassType)) {
-        return {
-          ok: false,
-          message: "لا يمكن الحفظ لأن هناك صفوفاً تحتوي على بيانات غير مكتملة. يرجى استكمال التوصيف أو حذف الصف.",
-          rowIndex,
-          column: `layer${layerIndex}-glassType`
-        };
-      }
-      if (!cleanName(layer.thickness)) {
-        return {
-          ok: false,
-          message: "لا يمكن الحفظ لأن هناك صفوفاً تحتوي على بيانات غير مكتملة. يرجى استكمال التوصيف أو حذف الصف.",
-          rowIndex,
-          column: `layer${layerIndex}-thickness`
-        };
-      }
-      if (!rowHasPanels(row) && numberValue(layer.width) <= 0) {
-        return {
-          ok: false,
-          message: "لا يمكن الحفظ لأن هناك صفوفاً تحتوي على بيانات غير مكتملة. يرجى استكمال التوصيف أو حذف الصف.",
-          rowIndex,
-          column: `layer${layerIndex}-width`
-        };
-      }
-      if (!rowHasPanels(row) && numberValue(layer.height) <= 0) {
-        return {
-          ok: false,
-          message: "لا يمكن الحفظ لأن هناك صفوفاً تحتوي على بيانات غير مكتملة. يرجى استكمال التوصيف أو حذف الصف.",
-          rowIndex,
-          column: `layer${layerIndex}-height`
-        };
-      }
-    }
-    if (!rowHasPanels(row) && numberValue(row.quantity) <= 0) {
-      return {
-        ok: false,
-        message: "لا يمكن الحفظ لأن هناك صفوفاً تحتوي على بيانات غير مكتملة. يرجى استكمال التوصيف أو حذف الصف.",
-        rowIndex,
-        column: "quantity"
-      };
-    }
-    if (row.glassMode === "double" && !cleanName(row.doubleGap)) {
-      return {
-        ok: false,
-        message: "لا يمكن الحفظ لأن هناك صفوفاً تحتوي على بيانات غير مكتملة. يرجى استكمال التوصيف أو حذف الصف.",
-        rowIndex,
-        column: "doubleGap"
-      };
-    }
-    if (row.glassMode === "triplex" && !cleanName(row.triplexPvb)) {
-      return {
-        ok: false,
-        message: "لا يمكن الحفظ لأن هناك صفوفاً تحتوي على بيانات غير مكتملة. يرجى استكمال التوصيف أو حذف الصف.",
-        rowIndex,
-        column: "triplexPvb"
-      };
-    }
-    validRows += 1;
-  }
-  if (!validRows) {
-    return {
-      ok: false,
-      message: "لا يمكن حفظ الطلب قبل إدخال توصيف الزجاج وإكمال بيانات بند واحد على الأقل.",
-      rowIndex: 0,
-      column: "layer0-glassType"
-    };
-  }
-  return { ok: true };
+  const first = errors[0];
+  return first
+    ? { ok: false, errors, message: first.message, rowIndex: first.rowIndex, column: first.field }
+    : { ok: true, errors: [] };
 }
 
 function validateOrderIssueDate(order = {}) {
@@ -5388,13 +5334,17 @@ function App() {
       setLoading(true);
       try {
         await waitForPaint(0);
-        const snapshot = orderSaveSnapshot(draft);
-        const validation = validateOrderRows(snapshot);
-        if (!validation.ok) {
-          setMessage(validation.message);
+        const sourceDraft = options.draftOverride || draft;
+        const validation = validateOrderForSave(sourceDraft, { customers: data.customers, suppliers: data.suppliers });
+        if (!validation.isValid) {
+          setMessage([
+            "تعذر حفظ الطلب لوجود بيانات مطلوبة غير مكتملة.",
+            validation.errors[0]?.message
+          ].filter(Boolean).join("\n"));
           setActiveTab("entry");
           return null;
         }
+        const snapshot = orderSaveSnapshot({ ...sourceDraft, rows: validation.payloadRows });
         let loadedOrderForId = snapshot.id
           ? data.orders.find((order) => order.id === snapshot.id)
           : null;
@@ -6024,7 +5974,7 @@ function App() {
             priceHistory={priceHistory}
             totals={totals}
             saving={loading}
-            onSave={() => saveDraft({ returnToOrigin: true })}
+            onSave={(validatedDraft) => saveDraft({ returnToOrigin: true, draftOverride: validatedDraft })}
             onPreview={previewDraftOrder}
             onExportPdf={exportDraftOrderPdf}
             onExportExcel={exportDraftOrderExcel}
@@ -6547,6 +6497,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   const [tableFullScreen, setTableFullScreen] = useState(false);
   const [deleteRowIndexes, setDeleteRowIndexes] = useState(null);
   const [invalidRowIndex, setInvalidRowIndex] = useState(null);
+  const [validationErrors, setValidationErrors] = useState([]);
   const [activeCell, setActiveCell] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
   const [selectedRange, setSelectedRange] = useState(null);
@@ -6573,6 +6524,10 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   const layerColumnTotal = layerColumnWidths.reduce((sum, width) => sum + width, 0);
   const effectiveEntryColumnWidths = entryColumnWidths.map((width, index) => index === layersColumnIndex ? layerColumnTotal : width);
   draftRef.current = draft;
+
+  useEffect(() => {
+    setValidationErrors([]);
+  }, [draft.clientDocumentId]);
 
   useEffect(() => {
     if (!pendingTableFocusRef.current) return;
@@ -6783,6 +6738,14 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     recordHistory("تعديل بيانات الطلب", { coalesceMs: 900, key: "draft-meta" });
     setDraft((current) => ({ ...current, ...patchValue }));
   }
+  function selectedPartyPatch(parties, value, nameField, idField) {
+    const normalized = cleanName(value).toLocaleLowerCase();
+    const selected = (parties || []).find((party) => cleanName(party.name).toLocaleLowerCase() === normalized);
+    patch({ [nameField]: value, [idField]: selected?.id || "" });
+    if (selected?.id) {
+      setValidationErrors((current) => current.filter((error) => error.field !== idField));
+    }
+  }
   function rememberRows(rows, options = {}) {
     const editKey = editingCell ? `${editingCell.rowId || editingCell.row}:${editingCell.column}` : "";
     const label = options.label || (editKey ? "تعديل خلية" : "تعديل جدول الإدخال");
@@ -6903,6 +6866,13 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (isEditingCell(rowIndex, column)) {
       setEditingCell(null);
     }
+    const currentRow = draftRef.current?.rows?.[rowIndex];
+    if (!currentRow?.id || !validationErrors.some((error) => error.scope === "row" && error.rowId === currentRow.id)) return;
+    const currentErrors = validateOrderRowForSave(currentRow, rowIndex);
+    setValidationErrors((existing) => [
+      ...existing.filter((error) => error.scope !== "row" || error.rowId !== currentRow.id),
+      ...currentErrors
+    ]);
   }
   function setCellValue(rowIndex, column, value, options = {}) {
     setInvalidRowIndex(null);
@@ -7004,15 +6974,21 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       rowSelectionAnchorRef.current = null;
       rangeDragRef.current = null;
       setInvalidRowIndex(null);
+      setValidationErrors((current) => current.filter((error) => !removalIds.has(error.rowId)));
       setEntryRowHeights((current) => {
         const next = { ...current };
         for (const rowId of removalIds) delete next[rowId];
         return next;
       });
-      setDraft((current) => ({
-        ...current,
-        rows: (current.rows || []).filter((row) => !removalIds.has(row.id))
-      }));
+      setDraft((current) => {
+        const originalIds = new Set((current.originalRowIds || []).map(String));
+        const explicitlyDeleted = [...removalIds].filter((rowId) => originalIds.has(String(rowId)));
+        return {
+          ...current,
+          deletedRowIds: [...new Set([...(current.deletedRowIds || []).map(String), ...explicitlyDeleted.map(String)])],
+          rows: (current.rows || []).filter((row) => !removalIds.has(row.id))
+        };
+      });
       notify?.(indexes.length > 1 ? `تم حذف ${indexes.length} صفوف.` : `تم حذف الصف ${indexes[0] + 1}.`);
     } finally {
       cleanupRendererInteractionState();
@@ -7839,6 +7815,39 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     }
     return false;
   }
+  function validationSummary(errors = []) {
+    const uniqueMessages = [...new Set(errors.map((error) => error.message).filter(Boolean))];
+    const details = uniqueMessages.slice(0, 4).join("\n");
+    return [
+      "تعذر حفظ الطلب لوجود بيانات مطلوبة غير مكتملة.",
+      "برجاء استكمال الحقول المحددة ثم إعادة الحفظ.",
+      details
+    ].filter(Boolean).join("\n");
+  }
+  function revealFirstSaveValidationError(error) {
+    if (!error) return;
+    if (error.scope === "row" && Number.isInteger(error.rowIndex)) {
+      setInvalidRowIndex(error.rowIndex);
+      focusEntryTableControl(error.rowIndex, error.field || "layer0-glassType", 0, { exact: true });
+      return;
+    }
+    const focusField = error.focusField || error.field;
+    const target = document.querySelector(`[data-order-field="${focusField}"] input, [data-order-field="${focusField}"] select`);
+    target?.closest?.(".field")?.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "smooth" });
+    restoreRendererInputFocus({ preferredElement: target });
+  }
+  function ensureOrderValidForSave() {
+    const currentDraft = draftRef.current || draft;
+    const result = validateOrderForSave(currentDraft, { customers, suppliers });
+    if (result.isValid) {
+      setValidationErrors([]);
+      return { ok: true, draft: currentDraft };
+    }
+    setValidationErrors(result.errors);
+    notify?.(validationSummary(result.errors));
+    revealFirstSaveValidationError(result.errors[0]);
+    return { ok: false, draft: currentDraft };
+  }
   function ensureRowsValid() {
     const validation = validateOrderRows(draft);
     return validation.ok || rejectInvalidOrder(validation);
@@ -7863,7 +7872,8 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   async function handleSave() {
     if (saving) return;
     await commitActiveEditorBeforeAction();
-    if (ensureRowsValid()) onSave();
+    const validation = ensureOrderValidForSave();
+    if (validation.ok) onSave(validation.draft);
   }
   async function handlePreview() {
     if (saving) return;
@@ -7909,6 +7919,12 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     tableFullScreen ? "table-fullscreen-active" : "",
     drawingFocusIndex >= 0 ? "drawing-mode-active" : ""
   ].filter(Boolean).join(" ");
+  const validationKeys = new Set(validationErrors.map(validationErrorKey));
+  const invalidRowIds = new Set(validationErrors.filter((error) => error.scope === "row").map((error) => error.rowId));
+  const isValidationCellInvalid = (rowIndex, column) => {
+    const rowId = draft.rows[rowIndex]?.id || `local-row-${rowIndex}`;
+    return validationKeys.has(`${rowId}:${column}`);
+  };
   return (
     <div className={entryStackClass}>
       {drawingFocusIndex < 0 && <section className="panel entry-order-panel">
@@ -7925,9 +7941,19 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
             <button className="primary" onClick={handleSave} disabled={saving}><Save size={18} />{saving ? "جار الحفظ..." : "حفظ"}</button>
           </div>
         </div>
+        {validationErrors.length > 0 && (
+          <div className="order-validation-summary" role="alert" aria-live="assertive">
+            <strong>تعذر حفظ الطلب لوجود بيانات مطلوبة غير مكتملة.</strong>
+            <span>استكمل الحقول المحددة ثم أعد الحفظ. لم يتم حذف أو حفظ أي بيانات.</span>
+            <ul>{[...new Set(validationErrors.map((error) => error.message))].slice(0, 6).map((message) => <li key={message}>{message}</li>)}</ul>
+          </div>
+        )}
         <div className="form-grid">
           <Field label="رقم الطلب الداخلي"><input className="generated-id" dir="ltr" value={displayOrderNo(draft.orderNo)} readOnly title="رقم تلقائي لا يتكرر" /></Field>
-          <Field label="التاريخ"><input type="date" dir="ltr" value={draft.date} onChange={(e) => patch({ date: e.target.value })} /></Field>
+          <Field label="التاريخ" fieldKey="date" invalid={validationKeys.has("order:date")}><input type="date" dir="ltr" value={draft.date} aria-invalid={validationKeys.has("order:date")} onChange={(e) => {
+            patch({ date: e.target.value });
+            if (e.target.value) setValidationErrors((current) => current.filter((error) => error.field !== "date"));
+          }} /></Field>
           <Field label="حالة الطلب">
             <select value={normalizeOrderStatus(draft.status)} onChange={(e) => patch({ status: e.target.value })}>
               {ORDER_STATUS_DEFS.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}
@@ -7939,8 +7965,8 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
               <option value="drawings">طلب زجاج برسم</option>
             </select>
           </Field>
-          <Field label="العميل"><Combo value={draft.customerName} options={customers.map((c) => c.name)} onChange={(customerName) => patch({ customerName })} /></Field>
-          <Field label="المورد"><Combo value={draft.supplierName} options={suppliers.map((s) => s.name)} onChange={(supplierName) => patch({ supplierName })} /></Field>
+          <Field label="العميل" fieldKey="customer" invalid={validationKeys.has("order:customerId")}><Combo value={draft.customerName} options={customers.map((c) => c.name)} aria-invalid={validationKeys.has("order:customerId")} onChange={(customerName) => selectedPartyPatch(customers, customerName, "customerName", "customerId")} /></Field>
+          <Field label="المورد" fieldKey="supplier" invalid={validationKeys.has("order:supplierId")}><Combo value={draft.supplierName} options={suppliers.map((s) => s.name)} aria-invalid={validationKeys.has("order:supplierId")} onChange={(supplierName) => selectedPartyPatch(suppliers, supplierName, "supplierName", "supplierId")} /></Field>
           <Field label="المشروع"><Combo value={draft.project} options={projectOptions} onChange={(project) => patch({ project })} /></Field>
         </div>
       </section>}
@@ -8042,13 +8068,14 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
                 copyFullRow={() => copyFullRowToNew(index)}
                 copyToFollowingRows={() => copyRowToFollowingRows(index)}
                 hasFollowingRows={index < draft.rows.length - 1}
-                invalid={invalidRowIndex === index}
+                invalid={invalidRowIndex === index || invalidRowIds.has(row.id)}
                 activeCell={activeCell}
                 selectedRange={selectedRange}
                 selectedRow={isRowSelected(index)}
                 isCellActive={isCellActive}
                 isCellSelected={isCellSelected}
                 isCellEditing={isEditingCell}
+                isCellInvalid={isValidationCellInvalid}
                 cellValue={cellRenderValue}
                 onCellValueChange={handleCellDraftChange}
                 onCellBlur={handleCellBlur}
@@ -8243,7 +8270,7 @@ function DrawingFocusEditor({ row, index, updateRow, onClose }) {
   );
 }
 
-function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptions, smartOptions, priceHistory, drawingEnabled, updateRow, addRow, removeRow, copyFullRow, copyToFollowingRows, hasFollowingRows, invalid = false, selectedRow = false, isCellActive = () => false, isCellSelected = () => false, isCellEditing = () => false, cellValue = (_rowIndex, _column, fallback) => fallback, onCellValueChange = () => {}, onCellBlur = () => {}, onRowSelect = () => {}, onRowContextMenu = () => {}, onCellFocus = () => {}, onCellPointerDown = () => {}, onCellCommitMove = () => {}, onCopyDownCell = () => {}, onRowResize = () => {}, onLearnTableOption = () => {} }) {
+function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptions, smartOptions, priceHistory, drawingEnabled, updateRow, addRow, removeRow, copyFullRow, copyToFollowingRows, hasFollowingRows, invalid = false, selectedRow = false, isCellActive = () => false, isCellSelected = () => false, isCellEditing = () => false, isCellInvalid = () => false, cellValue = (_rowIndex, _column, fallback) => fallback, onCellValueChange = () => {}, onCellBlur = () => {}, onRowSelect = () => {}, onRowContextMenu = () => {}, onCellFocus = () => {}, onCellPointerDown = () => {}, onCellCommitMove = () => {}, onCopyDownCell = () => {}, onRowResize = () => {}, onLearnTableOption = () => {} }) {
   const totals = rowTotals(row);
   const hasLayerSizeDifference = rowHasLayerSizeDifference(row);
   const composingCellRef = useRef("");
@@ -8252,12 +8279,14 @@ function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptio
     if (isCellSelected(index, column)) classes.push("selected-cell");
     if (isCellActive(index, column)) classes.push("active-cell");
     if (isCellEditing(index, column)) classes.push("editing-cell");
+    if (isCellInvalid(index, column)) classes.push("invalid-cell");
     return {
       className: classes.join(" "),
       "data-row": index,
       "data-row-id": row.id,
       "data-col": column,
       "data-editing": isCellEditing(index, column) ? "true" : "false",
+      "aria-invalid": isCellInvalid(index, column) ? "true" : undefined,
       tabIndex: isCellEditing(index, column) ? 0 : -1,
       onFocus: (event) => onCellFocus(index, column, event),
       onPointerDown: (event) => onCellPointerDown(index, column, event),
@@ -13534,8 +13563,8 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
   );
 }
 
-function Field({ label, children }) {
-  return <label className="field"><span>{label}</span>{children}</label>;
+function Field({ label, children, fieldKey = "", invalid = false }) {
+  return <label className={invalid ? "field invalid-field" : "field"} {...(fieldKey ? { "data-order-field": fieldKey } : {})}><span>{label}</span>{children}</label>;
 }
 
 function SupplierSubfolderPicker({ suppliers = [], selectedIds = [], selectedNames = [], onChange }) {

@@ -1,6 +1,6 @@
 {
   "name": "yd-glass-manager",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Glass Orders, Suppliers & Manufacturing",
   "author": "Y.D Software",
   "private": true,
@@ -142,6 +142,7 @@
       "dist/**/*",
       "electron/**/*",
       "server/**/*",
+      "src/orderSaveValidation.js",
       "icons/**/*",
       "supabase/**/*",
       "package.json"

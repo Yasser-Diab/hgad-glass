@@ -9,6 +9,7 @@ import { PGlite } from "@electric-sql/pglite";
 import XLSX from "xlsx";
 import { validateLocalOrderStatusPatch } from "./orderStatusValidation.mjs";
 import { mergeProtectedLocalOrderRows } from "./protectedCostMerge.mjs";
+import { validateOrderForSave } from "../src/orderSaveValidation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -442,7 +443,7 @@ async function migrate() {
     create table if not exists customers (id text primary key, name text not null unique, phone text, email text, address text, tax_no text, notes text, created_at text not null default current_timestamp);
     create table if not exists suppliers (id text primary key, name text not null unique, phone text, email text, address text, notes text, opening_balance real not null default 0, created_at text not null default current_timestamp);
     create table if not exists supplier_payments (id text primary key, supplier_id text, supplier_name text, paid_at text not null, amount real not null default 0, method text, notes text, created_at text not null default current_timestamp);
-    create table if not exists glass_orders (id text primary key, order_no text not null unique, document_id text, order_date text not null, entry_at text, status text not null default 'draft', entry_mode text not null default 'normal', collected_pieces real not null default 0, customer_name text, supplier_name text, project text, code text, notes text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
+    create table if not exists glass_orders (id text primary key, order_no text not null unique, document_id text, order_date text not null, entry_at text, status text not null default 'draft', entry_mode text not null default 'normal', collected_pieces real not null default 0, customer_id text, supplier_id text, customer_name text, supplier_name text, project text, code text, notes text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
     create table if not exists glass_order_rows (id text primary key, order_id text not null, line_no integer not null default 1, glass_mode text not null default 'single', code text, quantity real not null default 1, unit_price real not null default 0, supplier_unit_price real not null default 0, material_unit_price real not null default 0, supplier_material_unit_price real not null default 0, double_gap text, triplex_pvb text, extra_direction text, notes text, received_quantity real, receipt_history text not null default '[]', layers text not null, drawing text not null, area_m2 real not null default 0, cost real not null default 0, supplier_cost real not null default 0, created_at text not null default current_timestamp);
     create table if not exists learned_options (id text primary key, kind text not null, value text not null, unique(kind, value));
     alter table glass_order_rows add column if not exists material_unit_price real not null default 0;
@@ -453,6 +454,8 @@ async function migrate() {
     alter table glass_order_rows add column if not exists receipt_history text not null default '[]';
     alter table glass_orders add column if not exists entry_at text;
     alter table glass_orders add column if not exists collected_pieces real not null default 0;
+    alter table glass_orders add column if not exists customer_id text;
+    alter table glass_orders add column if not exists supplier_id text;
     alter table users add column if not exists email text;
     alter table users add column if not exists auth_user_id text;
     alter table users add column if not exists can_view_costs boolean not null default false;
@@ -529,7 +532,9 @@ async function bootstrap({ canViewCosts = true } = {}) {
       status: normalizeOrderStatus(order.status),
       collectedPieces: num(order.collected_pieces),
       entryMode: order.entry_mode,
+      customerId: order.customer_id || "",
       customerName: order.customer_name || "",
+      supplierId: order.supplier_id || "",
       supplierName: order.supplier_name || "",
       project: order.project || "",
       code: order.code || "",
@@ -540,8 +545,17 @@ async function bootstrap({ canViewCosts = true } = {}) {
 }
 
 async function saveOrder(order, shouldBootstrap = true, options = {}) {
+  const validation = validateOrderForSave(order);
+  if (!validation.isValid) {
+    const error = httpError("تعذر حفظ الطلب لوجود بيانات مطلوبة غير مكتملة.", 422);
+    error.code = "ORDER_VALIDATION_FAILED";
+    error.fields = validation.errors;
+    throw error;
+  }
   const customerName = clean(order.customerName);
   const supplierName = clean(order.supplierName);
+  const customerId = clean(order.customerId);
+  const supplierId = clean(order.supplierId);
   const entryAt = order.entryAt === "" ? null : (order.entryAt || new Date().toISOString());
   const status = normalizeOrderStatus(order.status);
   const saveAsExisting = order._existingOrder === true;
@@ -552,8 +566,14 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
     let savedId = clean(order.id);
     try {
       if (managesTransaction) await db.exec("begin");
-      await ensureParty("customers", customerName);
-      await ensureParty("suppliers", supplierName);
+      const selectedCustomer = await db.query("select id from customers where id = $1 and lower(name) = lower($2) limit 1", [customerId, customerName]);
+      const selectedSupplier = await db.query("select id from suppliers where id = $1 and lower(name) = lower($2) limit 1", [supplierId, supplierName]);
+      if (!selectedCustomer.rows[0] || !selectedSupplier.rows[0]) {
+        const error = httpError("اختيار العميل أو المورد غير صالح. اخترهما مرة أخرى من القائمة.", 422);
+        error.code = "ORDER_VALIDATION_FAILED";
+        error.fields = validation.errors;
+        throw error;
+      }
       if (savedId) {
         const byId = await db.query("select id from glass_orders where id = $1 limit 1", [savedId]);
         savedId = byId.rows[0]?.id || "";
@@ -582,7 +602,7 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
           throw new Error("رقم الطلب مستخدم بالفعل في طلب آخر. يرجى اختيار رقم مختلف.");
         }
       }
-      let rowsForSave = order.rows || [];
+      let rowsForSave = validation.payloadRows;
       let protectedSupplierCosts = new Map();
       if (options.preserveSupplierCosts === true) {
         if (!savedId) {
@@ -597,6 +617,27 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
         rowsForSave = protectedRows.rows;
         protectedSupplierCosts = protectedRows.protectedSupplierCosts;
       }
+      const incomingRowIds = rowsForSave.map((row) => clean(row.id)).filter(Boolean);
+      if (incomingRowIds.length !== new Set(incomingRowIds).size) {
+        const error = httpError("تعذر حفظ الطلب لأن أحد بنود الزجاج مكرر.", 422);
+        error.code = "ORDER_VALIDATION_FAILED";
+        throw error;
+      }
+      const explicitlyDeletedRowIds = [...new Set((order.deletedRowIds || []).map(clean).filter(Boolean))];
+      const existingRows = savedId
+        ? await db.query("select id from glass_order_rows where order_id = $1 for update", [savedId])
+        : { rows: [] };
+      const existingRowIds = new Set(existingRows.rows.map((row) => clean(row.id)));
+      const incomingRowIdSet = new Set(incomingRowIds);
+      const explicitlyDeletedRowIdSet = new Set(explicitlyDeletedRowIds);
+      const implicitlyMissingRows = [...existingRowIds].filter((rowId) => !incomingRowIdSet.has(rowId) && !explicitlyDeletedRowIdSet.has(rowId));
+      const foreignDeletion = explicitlyDeletedRowIds.find((rowId) => !existingRowIds.has(rowId));
+      if (implicitlyMissingRows.length || foreignDeletion) {
+        const error = httpError("تعذر حفظ الطلب لأن حذف البنود يجب أن يتم من زر حذف الصف فقط.", 422);
+        error.code = "ORDER_VALIDATION_FAILED";
+        error.fields = implicitlyMissingRows.map((rowId) => ({ scope: "row", rowId, field: "row", message: "يوجد بند محفوظ غير موجود في الطلب الحالي ولم يتم حذفه صراحة." }));
+        throw error;
+      }
       const params = [
         candidateOrderNo,
         order.documentId || null,
@@ -605,6 +646,8 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
         status,
         order.entryMode || "normal",
         num(order.collectedPieces),
+        customerId,
+        supplierId,
         customerName,
         supplierName,
         order.project || "",
@@ -613,14 +656,14 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
       ];
       if (savedId) {
         await db.query(
-          `update glass_orders set order_no=$1, document_id=$2, order_date=$3, entry_at=coalesce(entry_at, $4), status=$5, entry_mode=$6, collected_pieces=$7, customer_name=$8, supplier_name=$9, project=$10, code=$11, notes=$12, updated_at=current_timestamp where id=$13`,
+          `update glass_orders set order_no=$1, document_id=$2, order_date=$3, entry_at=coalesce(entry_at, $4), status=$5, entry_mode=$6, collected_pieces=$7, customer_id=$8, supplier_id=$9, customer_name=$10, supplier_name=$11, project=$12, code=$13, notes=$14, updated_at=current_timestamp where id=$15`,
           [...params, savedId]
         );
       } else {
         const insertId = order.id || gid("ord");
         await db.query(
-          `insert into glass_orders (id, order_no, document_id, order_date, entry_at, status, entry_mode, collected_pieces, customer_name, supplier_name, project, code, notes, updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,current_timestamp)`,
+          `insert into glass_orders (id, order_no, document_id, order_date, entry_at, status, entry_mode, collected_pieces, customer_id, supplier_id, customer_name, supplier_name, project, code, notes, updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,current_timestamp)`,
           [insertId, ...params]
         );
         savedId = insertId;
@@ -649,15 +692,16 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
           [rowId, savedId, index + 1, row.glassMode || "single", row.code || "", rowPhysicalQuantity(row), unitPrice, supplierUnitPrice, materialUnitPrice, supplierMaterialUnitPrice, row.doubleGap || null, row.triplexPvb || null, row.extraDirection || null, row.notes || "", row.receivedQuantity == null || row.receivedQuantity === "" ? null : num(row.receivedQuantity), JSON.stringify(Array.isArray(row.receiptHistory) ? row.receiptHistory : []), JSON.stringify(row.layers || []), JSON.stringify(row.drawing || { shapes: [], paths: [], edges: { top: 0, right: 0, bottom: 0, left: 0 }, panels: [] }), totals.area, totals.total, protectedSupplierCosts.has(rowId) ? protectedSupplierCosts.get(rowId) : totals.supplierCost]
         );
       }
-      if (savedRowIds.length) {
-        const placeholders = savedRowIds.map((_, index) => `$${index + 2}`).join(",");
-        await db.query(`delete from glass_order_rows where order_id = $1 and id not in (${placeholders})`, [savedId, ...savedRowIds]);
-      } else {
-        await db.query("delete from glass_order_rows where order_id = $1", [savedId]);
+      if (explicitlyDeletedRowIds.length) {
+        const placeholders = explicitlyDeletedRowIds.map((_, index) => `$${index + 2}`).join(",");
+        await db.query(`delete from glass_order_rows where order_id = $1 and id in (${placeholders})`, [savedId, ...explicitlyDeletedRowIds]);
       }
       if (managesTransaction) await db.exec("commit");
       order.orderNo = candidateOrderNo;
       order.id = savedId;
+      order.rows = rowsForSave;
+      order.originalRowIds = savedRowIds.map(String);
+      order.deletedRowIds = [];
       return shouldBootstrap ? bootstrap() : order;
     } catch (error) {
       if (managesTransaction) {
@@ -832,6 +876,10 @@ async function importExcel(filePath = workbookPath) {
     await db.exec("begin");
     await db.exec("delete from glass_order_rows; delete from glass_orders; delete from customers; delete from suppliers;");
     for (const order of grouped.values()) {
+      const customer = await ensureParty("customers", clean(order.customerName));
+      const supplier = await ensureParty("suppliers", clean(order.supplierName));
+      order.customerId = customer?.id || "";
+      order.supplierId = supplier?.id || "";
       await saveOrder(order, false, { externalTransaction: true });
       importedOrders += 1;
       importedRows += order.rows.length;
@@ -1064,8 +1112,12 @@ app.post("/api/orders", async (req, res) => {
     const message = duplicateOrderNoError(error)
       ? "تعذر إنشاء رقم فريد للطلب، ولم يتم فقد أي من البيانات المدخلة. يرجى إعادة المحاولة."
       : error.message;
-    const statusCode = /صلاحية.*تكلفة|supplier-cost permission|cost permission/i.test(message) ? 403 : 500;
-    res.status(statusCode).json({ error: message });
+    const statusCode = error.statusCode || error.httpStatus || (/صلاحية.*تكلفة|supplier-cost permission|cost permission/i.test(message) ? 403 : 500);
+    res.status(statusCode).json({
+      error: message,
+      ...(error.code ? { code: error.code } : {}),
+      ...(Array.isArray(error.fields) ? { fields: error.fields } : {})
+    });
   }
 });
 app.patch("/api/orders/:id/status", async (req, res) => {
