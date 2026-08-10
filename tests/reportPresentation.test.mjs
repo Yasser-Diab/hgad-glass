@@ -75,12 +75,21 @@ test("order report splits only unequal double or triplex layer measurements into
   assert.match(layerSplitHelpers, /function orderReportLineItems\(row = \{\}, index = 0\)/);
   assert.match(layerSplitHelpers, /layerAreaM2\(layer, pieceCount\)/);
   assert.match(layerSplitHelpers, /orderReportLayerDescription\(layer, layerIndex\)/);
-  assert.match(orderReport, /reportRows\.flatMap\(\(row, index\) => orderReportLineItems\(row, index\)\)/);
-  assert.match(orderReport, /split-layer-report-row/);
-  assert.match(drawingReport, /const reportLines = orderReportLineItems\(row, index\)/);
-  assert.match(drawingReport, /reportLines\.map\(\(line\) =>/);
-  assert.match(styleSource, /\.split-layer-report-row > span/);
-  assert.match(styleSource, /\.split-layer-description small/);
+  assert.match(orderReport, /function OrderReportLineGroup\(\{ row, index \}\)/);
+  assert.match(orderReport, /className="report-row order-report-row split-layer-report-group"/);
+  assert.match(orderReport, /"--split-layer-count": lines\.length/);
+  assert.match(orderReport, /split-root-cell split-root-number/);
+  assert.match(orderReport, /split-root-cell split-root-description/);
+  assert.match(orderReport, /split-layer-list-item/);
+  assert.match(drawingReport, /<OrderReportLineGroup row=\{row\} index=\{index\} \/>/);
+  assert.match(styleSource, /\.split-layer-report-group\s*\{[\s\S]*grid-template-rows:\s*repeat\(var\(--split-layer-count/);
+  assert.match(styleSource, /\.split-root-cell\s*\{[\s\S]*grid-row:\s*1 \/ calc\(var\(--split-layer-count/);
+  assert.match(styleSource, /\.split-root-cell\s*\{[\s\S]*border-bottom:\s*2px solid var\(--report-border\)/);
+  assert.match(styleSource, /\.split-root-description\s*\{[\s\S]*display:\s*grid/);
+  assert.match(styleSource, /\.split-root-description > bdi\s*\{[\s\S]*border-bottom:\s*1px solid color-mix/);
+  assert.match(styleSource, /\.split-layer-list\s*\{[\s\S]*grid-template-rows:\s*repeat\(var\(--split-layer-count,\s*2\),\s*minmax\(36px,\s*1fr\)\)/);
+  assert.match(styleSource, /\.split-layer-list-item:not\(:last-child\),\s*\.split-layer-value:not\(\.last\)/);
+  assert.match(styleSource, /\.split-layer-value\.last\s*\{[\s\S]*border-bottom-width:\s*2px/);
 });
 
 test("compact desktop entry layout is scoped away from full desktop and mobile", () => {

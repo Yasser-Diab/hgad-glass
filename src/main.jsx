@@ -4625,7 +4625,13 @@ async function selectedPartyForPersistence(client, table, id, name, label) {
   if (byName.error) throw byName.error;
   if (byName.data?.id) return byName.data;
 
-  const inserted = await client.from(table).insert({ name: selectedName, opening_balance: 0 }).select("id, name").single();
+  const insertPayload = table === "suppliers"
+    ? { name: selectedName, opening_balance: 0 }
+    : { name: selectedName };
+  let inserted = await client.from(table).insert(insertPayload).select("id, name").single();
+  if (inserted.error && missingSupabaseSchemaColumn(inserted.error, table) === "opening_balance") {
+    inserted = await client.from(table).insert({ name: selectedName }).select("id, name").single();
+  }
   if (inserted.error) throw inserted.error;
   return inserted.data;
 }
@@ -5583,10 +5589,19 @@ function App() {
   }
 
   async function previewDraftOrder() {
-    const saved = await saveDraft();
-    if (!saved) return null;
-    setPreview({ type: "order", order: saved });
-    return saved;
+    const sourceDraft = draftRef.current || draft;
+    const validation = validateOrderForReport(sourceDraft);
+    if (!validation.ok) {
+      setMessage(validation.message || "تعذر تجهيز المعاينة قبل استكمال البيانات المطلوبة.");
+      setActiveTab("entry");
+      return null;
+    }
+    const previewOrder = createDraft({
+      ...sourceDraft,
+      rows: (sourceDraft.rows || []).filter((row) => !isCompletelyEmptyOrderRow(row))
+    });
+    setPreview({ type: "order", order: previewOrder });
+    return previewOrder;
   }
 
   async function exportDraftOrderPdf() {
@@ -6958,8 +6973,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     return column === "mode" ||
       column === "extraDirection" ||
       column === "doubleGap" ||
-      column === "triplexPvb" ||
-      /^layer\d+-(glassType|company|thickness)$/.test(String(column || ""));
+      column === "triplexPvb";
   }
   function openEntryTableDropdown(rowIndex, column, attempt = 0) {
     const target = document.querySelector(tableControlSelector(rowIndex, column));
@@ -6992,6 +7006,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (editingCell && !sameTableCell(editingCell, nextCell)) {
       commitEditingCell();
     }
+    window.dispatchEvent(new Event("glass-orders-cancel-interactions"));
     setSelectedRowIds([]);
     setActiveCell(nextCell);
     setSelectedRange({ anchor: nextCell, focus: nextCell });
@@ -7537,6 +7552,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       activateDropdownCell(rowIndex, column);
       return;
     }
+    window.dispatchEvent(new Event("glass-orders-cancel-interactions"));
     if (editingCell && !sameTableCell(editingCell, nextCell)) {
       commitEditingCell();
     }
@@ -7553,6 +7569,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       activateDropdownCell(rowIndex, column);
       return;
     }
+    window.dispatchEvent(new Event("glass-orders-cancel-interactions"));
     startEditingCell(makeTableCell(rowIndex, column));
   }
   function columnForRowNear(rowIndex, column, fallbackColumnIndex = 0) {
@@ -11729,20 +11746,7 @@ function OrderReport({ order, currentUser, logoSrc }) {
       {!includeDrawingPages && (
         <div className="report-table order-report-table">
           <div className="report-row order-report-row head"><span>NO.</span><span className="description-header">البيان</span><span className="code-header">الكود</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
-          {reportRows.flatMap((row, index) => orderReportLineItems(row, index)).map((line) => (
-            <div className={line.split ? "report-row order-report-row split-layer-report-row" : "report-row order-report-row"} key={line.key}>
-              <span className="keep-line">{line.rowNumber}</span>
-              <span className={line.split ? "report-description description-cell split-layer-description" : "report-description description-cell"} dir="rtl">
-                <bdi><ArabicMixedText value={line.description} /></bdi>
-                {line.layerDescription && <small><ArabicMixedText value={line.layerDescription} /></small>}
-              </span>
-              <span dir="ltr" className="keep-line code-cell">{line.code}</span>
-              <span className="keep-line">{line.width}</span>
-              <span className="keep-line">{line.height}</span>
-              <span className="keep-line">{line.quantity}</span>
-              <span className="keep-line">{square(line.area)}</span>
-            </div>
-          ))}
+          {reportRows.map((row, index) => <OrderReportLineGroup key={row.id || `row-${index + 1}`} row={row} index={index} />)}
           <div className="report-row order-report-row subtotal"><span></span><span className="subtotal-label description-cell">الإجمالي</span><span className="code-cell"></span><span></span><span></span><span className="keep-line">{money(totals.pieces)}</span><span className="keep-line">{square(totals.area)}</span></div>
         </div>
       )}
@@ -11756,11 +11760,58 @@ function OrderReport({ order, currentUser, logoSrc }) {
   );
 }
 
+function OrderReportLineGroup({ row, index }) {
+  const lines = orderReportLineItems(row, index);
+  if (!lines.length) return null;
+  if (!lines[0].split || lines.length === 1) {
+    const line = lines[0];
+    return (
+      <div className="report-row order-report-row" key={line.key}>
+        <span className="keep-line">{line.rowNumber}</span>
+        <span className="report-description description-cell" dir="rtl"><bdi><ArabicMixedText value={line.description} /></bdi></span>
+        <span dir="ltr" className="keep-line code-cell">{line.code}</span>
+        <span className="keep-line">{line.width}</span>
+        <span className="keep-line">{line.height}</span>
+        <span className="keep-line">{line.quantity}</span>
+        <span className="keep-line">{square(line.area)}</span>
+      </div>
+    );
+  }
+  const root = lines[0];
+  return (
+    <div
+      className="report-row order-report-row split-layer-report-group"
+      style={{ "--split-layer-count": lines.length }}
+      key={root.key}
+    >
+      <span className="keep-line split-root-cell split-root-number">{root.rowNumber}</span>
+      <span className="report-description description-cell split-root-cell split-root-description" dir="rtl">
+        <bdi><ArabicMixedText value={root.description} /></bdi>
+        <span className="split-layer-list">
+          {lines.map((line) => (
+            <span className="split-layer-list-item" key={`${line.key}-description`}>
+              <ArabicMixedText value={line.layerDescription} />
+            </span>
+          ))}
+        </span>
+      </span>
+      <span dir="ltr" className="keep-line code-cell split-root-cell split-root-code">{root.code}</span>
+      {lines.map((line, layerIndex) => (
+        <React.Fragment key={`${line.key}-values`}>
+          <span className={`keep-line split-layer-value ${layerIndex === lines.length - 1 ? "last" : ""}`} style={{ gridColumn: 4, gridRow: layerIndex + 1 }}>{line.width}</span>
+          <span className={`keep-line split-layer-value ${layerIndex === lines.length - 1 ? "last" : ""}`} style={{ gridColumn: 5, gridRow: layerIndex + 1 }}>{line.height}</span>
+          <span className={`keep-line split-layer-value ${layerIndex === lines.length - 1 ? "last" : ""}`} style={{ gridColumn: 6, gridRow: layerIndex + 1 }}>{line.quantity}</span>
+          <span className={`keep-line split-layer-value ${layerIndex === lines.length - 1 ? "last" : ""}`} style={{ gridColumn: 7, gridRow: layerIndex + 1 }}>{square(line.area)}</span>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
 function DrawingReportPage({ row, index, order = {}, issueDateText = "" }) {
   const fabricationNotes = drawingFabricationNotes(row);
   const notes = fabricationNotes.length ? fabricationNotes : ["لوح مسطح بدون قص أو ثقوب إضافية."];
   const panels = rowHasPanels(row) ? rowDrawingPanels(row) : [];
-  const reportLines = orderReportLineItems(row, index);
   return (
     <div className="drawing-page">
       <div className="drawing-page-header">
@@ -11769,20 +11820,7 @@ function DrawingReportPage({ row, index, order = {}, issueDateText = "" }) {
       </div>
       <div className="report-table order-report-table drawing-item-table">
         <div className="report-row order-report-row head"><span>NO.</span><span className="description-header">البيان</span><span className="code-header">الكود</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
-        {reportLines.map((line) => (
-          <div className={line.split ? "report-row order-report-row split-layer-report-row" : "report-row order-report-row"} key={line.key}>
-            <span className="keep-line">{line.rowNumber}</span>
-            <span className={line.split ? "report-description description-cell split-layer-description" : "report-description description-cell"} dir="rtl">
-              <bdi><ArabicMixedText value={line.description} /></bdi>
-              {line.layerDescription && <small><ArabicMixedText value={line.layerDescription} /></small>}
-            </span>
-            <span dir="ltr" className="keep-line code-cell">{line.code}</span>
-            <span className="keep-line">{line.width}</span>
-            <span className="keep-line">{line.height}</span>
-            <span className="keep-line">{line.quantity}</span>
-            <span className="keep-line">{square(line.area)}</span>
-          </div>
-        ))}
+        <OrderReportLineGroup row={row} index={index} />
       </div>
       {panels.length ? (
         <>
@@ -14411,6 +14449,12 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
           if (editing) setOpen(true);
         }}
         onFocus={openWithNavigationDelay}
+        onBlur={(event) => {
+          inputProps.onBlur?.(event);
+          window.setTimeout(() => {
+            if (!wrapRef.current?.contains(document.activeElement)) setOpen(false);
+          }, 0);
+        }}
         onKeyDown={handleKeyDown}
         dir={inputProps.dir || "auto"}
         autoComplete="off"
@@ -14423,6 +14467,7 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
         tabIndex={-1}
         onMouseDown={(event) => preventCancelableDefault(event)}
         onClick={() => {
+          if (!editing) return;
           setOpen((current) => !current);
           inputRef.current?.focus?.();
         }}
@@ -14710,6 +14755,70 @@ function reportPrintCss() {
         minmax(58px, .72fr)
         minmax(44px, .5fr)
         minmax(52px, .62fr);
+    }
+    .split-layer-report-group {
+      grid-template-rows: repeat(var(--split-layer-count, 2), minmax(44px, auto));
+      background: color-mix(in srgb, var(--report-row-background) 92%, #eaf3ff);
+    }
+    .split-layer-report-group > span {
+      background: transparent;
+    }
+    .split-root-cell {
+      grid-row: 1 / calc(var(--split-layer-count, 2) + 1);
+      border-bottom: 2px solid var(--report-border);
+      background: color-mix(in srgb, var(--report-row-background) 97%, #edf6ff);
+    }
+    .split-root-number {
+      grid-column: 1;
+      font-weight: 900;
+    }
+    .split-root-description {
+      grid-column: 2;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      align-items: stretch;
+      justify-content: flex-start;
+      text-align: right;
+      gap: 0;
+      padding: 0;
+      line-height: 1.35;
+    }
+    .split-root-description > bdi {
+      display: block;
+      width: 100%;
+      padding: 8px 10px 6px;
+      border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent);
+    }
+    .split-root-code { grid-column: 3; }
+    .split-layer-list {
+      display: grid;
+      grid-template-rows: repeat(var(--split-layer-count, 2), minmax(36px, 1fr));
+      width: 100%;
+      margin-top: 0;
+      border-top: 0;
+      color: #35506b;
+      font-size: .82em;
+      font-weight: 800;
+    }
+    .split-layer-list-item {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      min-height: 36px;
+      padding: 5px 10px;
+    }
+    .split-layer-list-item:not(:last-child),
+    .split-layer-value:not(.last) {
+      border-bottom: 1px solid color-mix(in srgb, var(--report-border) 36%, transparent);
+    }
+    .split-layer-value {
+      min-height: 44px;
+      border-bottom-color: color-mix(in srgb, var(--report-border) 36%, transparent);
+      background: color-mix(in srgb, var(--report-row-background) 95%, #eef7ff);
+    }
+    .split-layer-value.last {
+      border-bottom-width: 2px;
+      border-bottom-color: var(--report-border);
     }
     .order-status-report {
       min-width: 0;
@@ -15438,10 +15547,76 @@ function preparePdfClone(clonedDocument, clonedElement) {
         minmax(44px, .5fr)
         minmax(52px, .62fr) !important;
     }
+    .pdf-export-root .split-layer-report-group,
+    .pdf-host .split-layer-report-group {
+      grid-template-rows: repeat(var(--split-layer-count, 2), minmax(44px, auto)) !important;
+    }
+    .pdf-export-root .split-root-cell,
+    .pdf-host .split-root-cell {
+      grid-row: 1 / calc(var(--split-layer-count, 2) + 1) !important;
+      border-bottom: 2px solid var(--report-border) !important;
+      background: color-mix(in srgb, var(--report-row-background) 97%, #edf6ff) !important;
+    }
+    .pdf-export-root .split-root-number,
+    .pdf-host .split-root-number {
+      grid-column: 1 !important;
+      font-weight: 900 !important;
+    }
+    .pdf-export-root .split-root-description,
+    .pdf-host .split-root-description {
+      grid-column: 2 !important;
+      display: grid !important;
+      grid-template-rows: auto 1fr !important;
+      align-items: stretch !important;
+      gap: 0 !important;
+      padding: 0 !important;
+    }
+    .pdf-export-root .split-root-description > bdi,
+    .pdf-host .split-root-description > bdi {
+      display: block !important;
+      width: 100% !important;
+      padding: 8px 10px 6px !important;
+      border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent) !important;
+    }
+    .pdf-export-root .split-root-code,
+    .pdf-host .split-root-code { grid-column: 3 !important; }
+    .pdf-export-root .split-layer-list,
+    .pdf-host .split-layer-list {
+      grid-template-rows: repeat(var(--split-layer-count, 2), minmax(36px, 1fr)) !important;
+      margin-top: 0 !important;
+      border-top: 0 !important;
+    }
+    .pdf-export-root .split-layer-list-item,
+    .pdf-host .split-layer-list-item {
+      min-height: 36px !important;
+      padding: 5px 10px !important;
+    }
+    .pdf-export-root .split-layer-value:not(.last),
+    .pdf-host .split-layer-value:not(.last) {
+      border-bottom-color: color-mix(in srgb, var(--report-border) 36%, transparent) !important;
+      border-bottom-width: 1px !important;
+    }
+    .pdf-export-root .split-layer-value.last,
+    .pdf-host .split-layer-value.last {
+      border-bottom-color: var(--report-border) !important;
+      border-bottom-width: 2px !important;
+    }
     .pdf-export-root .report-row > span,
     .pdf-host .report-row > span {
       border-inline-start: 1px solid var(--report-border) !important;
       border-bottom: 1px solid var(--report-border) !important;
+    }
+    .pdf-export-root .split-root-cell,
+    .pdf-host .split-root-cell,
+    .pdf-export-root .split-layer-value.last,
+    .pdf-host .split-layer-value.last {
+      border-bottom-color: var(--report-border) !important;
+      border-bottom-width: 2px !important;
+    }
+    .pdf-export-root .split-layer-value:not(.last),
+    .pdf-host .split-layer-value:not(.last) {
+      border-bottom-color: color-mix(in srgb, var(--report-border) 36%, transparent) !important;
+      border-bottom-width: 1px !important;
     }
     .pdf-export-root .report-row > span:first-child,
     .pdf-host .report-row > span:first-child {

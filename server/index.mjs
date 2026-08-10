@@ -582,6 +582,29 @@ async function bootstrap({ canViewCosts = true } = {}) {
   };
 }
 
+async function ensureOrderPartyForSave(table, selectedId, selectedName) {
+  const name = clean(selectedName);
+  if (!name) {
+    const error = httpError(table === "customers" ? "يجب اختيار العميل قبل حفظ الطلب." : "يجب اختيار المورد قبل حفظ الطلب.", 422);
+    error.code = "ORDER_VALIDATION_FAILED";
+    throw error;
+  }
+  const id = clean(selectedId);
+  if (id) {
+    const selected = await db.query(`select id, name from ${table} where id = $1 and lower(name) = lower($2) limit 1`, [id, name]);
+    if (selected.rows[0]?.id) return selected.rows[0];
+  }
+  const byName = await db.query(`select id, name from ${table} where lower(name) = lower($1) limit 1`, [name]);
+  if (byName.rows[0]?.id) return byName.rows[0];
+  const newId = gid(table === "customers" ? "cus" : "sup");
+  if (table === "suppliers") {
+    await db.query("insert into suppliers (id, name, opening_balance) values ($1, $2, 0)", [newId, name]);
+  } else {
+    await db.query("insert into customers (id, name) values ($1, $2)", [newId, name]);
+  }
+  return { id: newId, name };
+}
+
 async function saveOrder(order, shouldBootstrap = true, options = {}) {
   const validation = validateOrderForSave(order);
   if (!validation.isValid) {
@@ -592,8 +615,8 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
   }
   const customerName = clean(order.customerName);
   const supplierName = clean(order.supplierName);
-  const customerId = clean(order.customerId);
-  const supplierId = clean(order.supplierId);
+  let customerId = clean(order.customerId);
+  let supplierId = clean(order.supplierId);
   const entryAt = order.entryAt === "" ? null : (order.entryAt || new Date().toISOString());
   const status = normalizeOrderStatus(order.status);
   const saveAsExisting = order._existingOrder === true;
@@ -603,14 +626,10 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
     let savedId = clean(order.id);
     try {
       if (managesTransaction) await db.exec("begin");
-      const selectedCustomer = await db.query("select id from customers where id = $1 and lower(name) = lower($2) limit 1", [customerId, customerName]);
-      const selectedSupplier = await db.query("select id from suppliers where id = $1 and lower(name) = lower($2) limit 1", [supplierId, supplierName]);
-      if (!selectedCustomer.rows[0] || !selectedSupplier.rows[0]) {
-        const error = httpError("اختيار العميل أو المورد غير صالح. اخترهما مرة أخرى من القائمة.", 422);
-        error.code = "ORDER_VALIDATION_FAILED";
-        error.fields = validation.errors;
-        throw error;
-      }
+      const selectedCustomer = await ensureOrderPartyForSave("customers", customerId, customerName);
+      const selectedSupplier = await ensureOrderPartyForSave("suppliers", supplierId, supplierName);
+      customerId = selectedCustomer.id;
+      supplierId = selectedSupplier.id;
       if (savedId) {
         const byId = await db.query("select id from glass_orders where id = $1 limit 1", [savedId]);
         savedId = byId.rows[0]?.id || "";

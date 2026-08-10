@@ -59,7 +59,7 @@ test("selected cells start editing only from explicit edit actions", () => {
   assert.match(doubleClickHandler, /startEditingCell\(makeTableCell\(rowIndex, column\)\)/);
 });
 
-test("dropdown cells keep Excel selection but open from one click and Space", () => {
+test("only fixed-choice table dropdown cells open from one click and Space", () => {
   const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
   const pointerHandler = sourceSection("function handleCellPointerDown(", "function handleCellDoubleClick(");
   const doubleClickHandler = sourceSection("function handleCellDoubleClick(", "function columnForRowNear(");
@@ -67,15 +67,22 @@ test("dropdown cells keep Excel selection but open from one click and Space", ()
   const comboSource = sourceSection("function Combo(", "function SearchBox(");
 
   assert.match(entrySource, /function isDropdownCellColumn\(column = ""\)/);
-  assert.match(entrySource, /\^layer\\d\+\-\(glassType\|company\|thickness\)\$/);
+  assert.doesNotMatch(entrySource, /\^layer\\d\+\-\(glassType\|company\|thickness\)\$/);
+  assert.match(entrySource, /column === "mode"/);
+  assert.match(entrySource, /column === "extraDirection"/);
+  assert.match(entrySource, /column === "doubleGap"/);
+  assert.match(entrySource, /column === "triplexPvb"/);
   assert.match(entrySource, /function openEntryTableDropdown\(rowIndex, column/);
   assert.match(entrySource, /showPicker/);
   assert.match(entrySource, /glass-orders-open-combo/);
+  assert.match(entrySource, /window\.dispatchEvent\(new Event\("glass-orders-cancel-interactions"\)\)/);
   assert.match(pointerHandler, /if \(isDropdownCellColumn\(column\)\) \{[\s\S]*activateDropdownCell\(rowIndex, column\)/);
   assert.match(doubleClickHandler, /if \(isDropdownCellColumn\(column\)\) \{[\s\S]*activateDropdownCell\(rowIndex, column\)/);
   assert.match(keyHandler, /event\.key === " " \|\| event\.code === "Space"/);
   assert.match(keyHandler, /activateDropdownCell\(rowIndex, column\)/);
   assert.match(comboSource, /node\.addEventListener\("glass-orders-open-combo", forceOpenCombo\)/);
+  assert.match(comboSource, /onBlur=\{\(event\) => \{[\s\S]*setOpen\(false\)/);
+  assert.match(comboSource, /if \(!editing\) return;[\s\S]*setOpen\(\(current\) => !current\)/);
 });
 
 test("smart-table selected-but-not-editing cells use spreadsheet selection affordance", () => {

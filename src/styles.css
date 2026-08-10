@@ -3541,22 +3541,69 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
     minmax(44px, .5fr)
     minmax(52px, .62fr);
 }
-.split-layer-report-row > span {
-  background: color-mix(in srgb, var(--report-row-background) 88%, #eaf3ff);
+.split-layer-report-group {
+  grid-template-rows: repeat(var(--split-layer-count, 2), minmax(44px, auto));
+  background: color-mix(in srgb, var(--report-row-background) 92%, #eaf3ff);
 }
-.split-layer-report-row + .split-layer-report-row > span {
-  border-top-style: dashed;
+.split-layer-report-group > span {
+  background: transparent;
 }
-.split-layer-description {
-  align-items: flex-start;
-  gap: 3px;
+.split-root-cell {
+  grid-row: 1 / calc(var(--split-layer-count, 2) + 1);
+  border-bottom: 2px solid var(--report-border);
+  background: color-mix(in srgb, var(--report-row-background) 97%, #edf6ff);
+}
+.split-root-number {
+  grid-column: 1;
+  font-weight: 900;
+}
+.split-root-description {
+  grid-column: 2;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  align-items: stretch;
+  justify-content: flex-start;
+  text-align: right;
+  gap: 0;
+  padding: 0;
   line-height: 1.35;
 }
-.split-layer-description small {
+.split-root-description > bdi {
   display: block;
+  width: 100%;
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent);
+}
+.split-root-code { grid-column: 3; }
+.split-layer-list {
+  display: grid;
+  grid-template-rows: repeat(var(--split-layer-count, 2), minmax(36px, 1fr));
+  width: 100%;
+  margin-top: 0;
+  border-top: 0;
   color: #35506b;
   font-size: .82em;
   font-weight: 800;
+}
+.split-layer-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 36px;
+  padding: 5px 10px;
+}
+.split-layer-list-item:not(:last-child),
+.split-layer-value:not(.last) {
+  border-bottom: 1px solid color-mix(in srgb, var(--report-border) 36%, transparent);
+}
+.split-layer-value {
+  min-height: 44px;
+  border-bottom-color: color-mix(in srgb, var(--report-border) 36%, transparent);
+  background: color-mix(in srgb, var(--report-row-background) 95%, #eef7ff);
+}
+.split-layer-value.last {
+  border-bottom-width: 2px;
+  border-bottom-color: var(--report-border);
 }
 .order-report-row.subtotal .subtotal-label {
   text-align: center;

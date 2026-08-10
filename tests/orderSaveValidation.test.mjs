@@ -197,6 +197,18 @@ test("save flow validates the raw draft before building a filtered persistence s
   assert.match(saveSource, /if \(!validation\.isValid\)[\s\S]*?return null/);
 });
 
+test("order preview validates and renders the draft without saving first", () => {
+  const mainSource = readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+  const previewStart = mainSource.indexOf("async function previewDraftOrder()");
+  const previewEnd = mainSource.indexOf("async function exportDraftOrderPdf", previewStart);
+  const previewSource = mainSource.slice(previewStart, previewEnd);
+
+  assert.match(previewSource, /validateOrderForReport\(sourceDraft\)/);
+  assert.match(previewSource, /setPreview\(\{ type: "order", order: previewOrder \}\)/);
+  assert.doesNotMatch(previewSource, /saveDraft\(/);
+  assert.doesNotMatch(previewSource, /saveOrderToStore|saveOrderToSupabase|client\.rpc/);
+});
+
 test("validation summary remains a checklist and resolved fields leave the active invalid set", () => {
   const mainSource = readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
   const entryStart = mainSource.indexOf("function EntryView(");
