@@ -33,16 +33,54 @@ test("normal typing, native caret keys, paste, and composition are not hijacked"
   const keyHandler = sourceSection("function handleTableKeyDown(", "function handleTablePaste(");
   const pasteHandler = sourceSection("function handleTablePaste(", "function rejectInvalidOrder(");
   const rowEditorSource = sourceSection("function GlassRowEditor(", "function thicknessMmValue(");
-  const nativeEditorStart = keyHandler.indexOf("if (target && isEditableDomTarget(target))");
+  const nativeEditorStart = keyHandler.indexOf("if (target && isEditableDomTarget(target) && editing)");
   const nativeEditorEnd = keyHandler.indexOf("if (!editing && event.key === \"Delete\"", nativeEditorStart);
   const nativeEditorBlock = keyHandler.slice(nativeEditorStart, nativeEditorEnd);
 
-  assert.match(keyHandler, /if \(target && isEditableDomTarget\(target\)\) \{[\s\S]*?event\.key === "Tab"[\s\S]*?event\.key === "Enter"[\s\S]*?return;[\s\S]*?\}/);
+  assert.match(keyHandler, /if \(target && isEditableDomTarget\(target\) && editing\) \{[\s\S]*?event\.key === "Tab"[\s\S]*?event\.key === "Enter"[\s\S]*?return;[\s\S]*?\}/);
   assert.doesNotMatch(nativeEditorBlock, /ArrowLeft|ArrowRight|Backspace|Delete/);
   assert.match(pasteHandler, /isEditableDomTarget\(eventTarget\) && !\/\[\\t\\r\\n\]\//);
   assert.match(rowEditorSource, /onCompositionStart/);
   assert.match(rowEditorSource, /onCompositionEnd/);
   assert.match(keyHandler, /event\.isComposing \|\| event\.nativeEvent\?\.isComposing/);
+});
+
+test("selected cells start editing only from explicit edit actions", () => {
+  const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
+  const rowEditorSource = sourceSection("function GlassRowEditor(", "function thicknessMmValue(");
+  const pointerHandler = sourceSection("function handleCellPointerDown(", "function handleCellDoubleClick(");
+  const doubleClickHandler = sourceSection("function handleCellDoubleClick(", "function columnForRowNear(");
+
+  assert.match(rowEditorSource, /onDoubleClick: \(event\) => onCellDoubleClick\(index, column, event\)/);
+  assert.match(entrySource, /onCellDoubleClick=\{handleCellDoubleClick\}/);
+  assert.match(pointerHandler, /setEditingCell\(null\)/);
+  assert.doesNotMatch(pointerHandler, /setEditingCell\(nextCell\)/);
+  assert.match(doubleClickHandler, /startEditingCell\(makeTableCell\(rowIndex, column\)\)/);
+});
+
+test("manual numeric input preserves decimal separators while typing", () => {
+  const numericSource = sourceSection("function normalizedCellValueForColumn(", "function readRowCellValue(");
+  assert.match(numericSource, /replace\(",", "\."\)/);
+  assert.match(numericSource, /\^-\?\(\?:\\d\+\(\?:\\\./);
+  assert.doesNotMatch(numericSource, /String\(parsed\);[\s\S]*?return parsed === null/);
+});
+
+test("Ctrl shortcuts use physical keys so they work on non-English keyboard layouts", () => {
+  const keyHandler = sourceSection("function handleTableKeyDown(", "function handleTablePaste(");
+  assert.match(keyHandler, /const isShortcut = \(code, key\) => event\.code === code/);
+  assert.match(keyHandler, /isShortcut\("KeyD", "d"\)/);
+  assert.match(keyHandler, /isShortcut\("KeyZ", "z"\)/);
+  assert.match(keyHandler, /isShortcut\("KeyY", "y"\)/);
+});
+
+test("delete dialogs do not restore focus to stale deleted row controls", () => {
+  const orderDeleteModal = sourceSection("function DeleteOrderModal(", "function DashboardView(");
+  const rowDeleteModal = sourceSection("function RowDeleteModal(", "function GlassRowEditor(");
+
+  assert.match(orderDeleteModal, /cleanupRendererInteractionState\(\)/);
+  assert.match(rowDeleteModal, /cleanupRendererInteractionState\(\)/);
+  assert.doesNotMatch(orderDeleteModal, /restoreRendererInputFocus/);
+  assert.doesNotMatch(rowDeleteModal, /restoreRendererInputFocus/);
 });
 
 test("a 50-character edit remains one complete local row value", () => {

@@ -82,38 +82,14 @@ function validationError({ scope = "row", field, message, row, rowIndex, focusFi
   };
 }
 
-function findSelectedParty(parties = [], id, name) {
-  const expectedId = cleanText(id);
-  const expectedName = normalizedName(name);
-  if (!expectedId || !expectedName) return null;
-  return parties.find((party) => cleanText(party?.id) === expectedId && normalizedName(party?.name) === expectedName) || null;
-}
-
 function validatePartySelection({ order, parties, nameField, idField, label, focusField }) {
   const name = cleanText(order?.[nameField]);
-  const id = cleanText(order?.[idField]);
   if (!name) {
     return validationError({
       scope: "order",
       field: idField,
       focusField,
       message: `يجب اختيار ${label} قبل حفظ الطلب.`
-    });
-  }
-  if (!id) {
-    return validationError({
-      scope: "order",
-      field: idField,
-      focusField,
-      message: `يجب اختيار ${label} من القائمة قبل حفظ الطلب.`
-    });
-  }
-  if (Array.isArray(parties) && parties.length && !findSelectedParty(parties, id, name)) {
-    return validationError({
-      scope: "order",
-      field: idField,
-      focusField,
-      message: `اختيار ${label} غير صالح. اختر ${label} مرة أخرى من القائمة.`
     });
   }
   return null;

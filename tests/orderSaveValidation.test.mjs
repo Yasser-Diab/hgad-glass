@@ -84,10 +84,10 @@ function validOrder(rows = [completeRow()], overrides = {}) {
 
 const validationOptions = { customers: [customer], suppliers: [supplier] };
 
-test("requires selected customer and supplier database IDs, not display names alone", () => {
+test("requires customer and supplier names but allows first-time party names", () => {
   const missingBoth = validateOrderForSave(validOrder([completeRow()], {
-    customerId: "",
-    supplierId: ""
+    customerName: "",
+    supplierName: ""
   }), validationOptions);
 
   assert.equal(missingBoth.isValid, false);
@@ -95,11 +95,13 @@ test("requires selected customer and supplier database IDs, not display names al
   assert.match(missingBoth.errors[0].message, /اختيار العميل/);
   assert.match(missingBoth.errors[1].message, /اختيار المورد/);
 
-  const staleSelection = validateOrderForSave(validOrder([completeRow()], {
-    supplierId: "unknown-supplier"
+  const firstTimeNames = validateOrderForSave(validOrder([completeRow()], {
+    customerId: "",
+    customerName: "عميل جديد",
+    supplierId: "",
+    supplierName: "مورد جديد"
   }), validationOptions);
-  assert.equal(staleSelection.isValid, false);
-  assert.equal(staleSelection.errors[0].field, "supplierId");
+  assert.equal(firstTimeNames.isValid, true);
 });
 
 test("internal defaults remain empty while every meaningful user value makes a row partial", () => {

@@ -103,7 +103,7 @@ import {
 import "./styles.css";
 
 const VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "0.0.0";
-const APP_VARIANT = import.meta.env.VITE_APP_VARIANT === "status" ? "status" : "full";
+const APP_VARIANT = import.meta.env.VITE_APP_VARIANT === "status" || import.meta.env.MODE === "status" ? "status" : "full";
 const IS_STATUS_VARIANT = APP_VARIANT === "status";
 const APP_NAME = "Y.D";
 const FULL_APP_NAME = "Y.D Glass Manager";
@@ -1415,6 +1415,8 @@ function isNumericColumn(column = "") {
 function normalizedCellValueForColumn(column, value) {
   if (!isNumericColumn(column)) return value;
   if (cleanName(value) === "") return "";
+  const text = toLatinClipboardDigits(value).trim().replace(",", ".");
+  if (/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) return text;
   const parsed = clipboardNumber(value);
   return parsed === null ? null : String(parsed);
 }
@@ -4501,15 +4503,25 @@ async function savePaymentToSupabase(client, payment) {
 async function selectedPartyForPersistence(client, table, id, name, label) {
   const selectedId = cleanName(id);
   const selectedName = cleanName(name);
-  if (!selectedId || !selectedName) {
-    throw new Error(`يجب اختيار ${label} من القائمة قبل حفظ الطلب.`);
+  if (!selectedName) {
+    throw new Error(`يجب إدخال ${label} قبل حفظ الطلب.`);
   }
-  const existing = await client.from(table).select("id, name").eq("id", selectedId).maybeSingle();
-  if (existing.error) throw existing.error;
-  if (!existing.data || cleanName(existing.data.name).toLocaleLowerCase() !== selectedName.toLocaleLowerCase()) {
-    throw new Error(`اختيار ${label} غير صالح. اختر ${label} مرة أخرى من القائمة.`);
+
+  if (selectedId) {
+    const existing = await client.from(table).select("id, name").eq("id", selectedId).maybeSingle();
+    if (existing.error) throw existing.error;
+    if (existing.data && cleanName(existing.data.name).toLocaleLowerCase() === selectedName.toLocaleLowerCase()) {
+      return existing.data;
+    }
   }
-  return existing.data;
+
+  const byName = await client.from(table).select("id, name").eq("name", selectedName).maybeSingle();
+  if (byName.error) throw byName.error;
+  if (byName.data?.id) return byName.data;
+
+  const inserted = await client.from(table).insert({ name: selectedName, opening_balance: 0 }).select("id, name").single();
+  if (inserted.error) throw inserted.error;
+  return inserted.data;
 }
 
 function upsertLocalParty(list, name) {
@@ -6117,7 +6129,6 @@ function Notice({ message, action, onClose }) {
 
 function DeleteOrderModal({ order, busy, onClose, onConfirm }) {
   const [confirmation, setConfirmation] = useState("");
-  const returnFocusRef = useRef(typeof document !== "undefined" ? document.activeElement : null);
   const closeRef = useRef(onClose);
   const busyRef = useRef(busy);
   closeRef.current = onClose;
@@ -6133,7 +6144,6 @@ function DeleteOrderModal({ order, busy, onClose, onConfirm }) {
     return () => {
       window.removeEventListener("keydown", handleEscape, true);
       cleanupRendererInteractionState();
-      restoreRendererInputFocus({ preferredElement: returnFocusRef.current });
     };
   }, []);
   return (
@@ -6774,8 +6784,8 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const normalized = cleanName(value).toLocaleLowerCase();
     const selected = (parties || []).find((party) => cleanName(party.name).toLocaleLowerCase() === normalized);
     patch({ [nameField]: value, [idField]: selected?.id || "" });
-    if (selected?.id) {
-      setValidationErrors((current) => current.filter((error) => error.field !== idField));
+    if (cleanName(value)) {
+      setValidationErrors((current) => current.filter((error) => error.field !== idField && error.focusField !== nameField.replace(/Name$/, "")));
     }
   }
   function rememberRows(rows, options = {}) {
@@ -7332,7 +7342,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const nextCell = makeTableCell(rowIndex, column);
     setSelectedRowIds([]);
     setActiveCell(nextCell);
-    setEditingCell(nextCell);
     setSelectedRange((current) => {
       if (event?.shiftKey && current?.anchor) return { anchor: current.anchor, focus: nextCell };
       return { anchor: nextCell, focus: nextCell };
@@ -7372,10 +7381,13 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       commitEditingCell();
     }
     if (!event.shiftKey) {
+      preventCancelableDefault(event);
+      event.stopPropagation();
       setSelectedRowIds([]);
       setActiveCell(nextCell);
       setSelectedRange({ anchor: nextCell, focus: nextCell });
-      setEditingCell(nextCell);
+      setEditingCell(null);
+      window.requestAnimationFrame(() => focusTableShell());
       return;
     }
     preventCancelableDefault(event);
@@ -7383,6 +7395,11 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     setEditingCell(null);
     beginRangeDrag(rowIndex, column, event);
     focusTableShell();
+  }
+  function handleCellDoubleClick(rowIndex, column, event) {
+    preventCancelableDefault(event);
+    event.stopPropagation();
+    startEditingCell(makeTableCell(rowIndex, column));
   }
   function columnForRowNear(rowIndex, column, fallbackColumnIndex = 0) {
     if (columnExistsInRow(rowIndex, column)) return column;
@@ -7697,7 +7714,35 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       preventCancelableDefault(event);
       event.stopPropagation();
     };
-    if (target && isEditableDomTarget(target)) {
+    const commitEditorForKey = () => commitEditingCell();
+    const isShortcut = (code, key) => event.code === code || String(event.key || "").toLocaleLowerCase() === key;
+    if (shortcutModifier && !event.shiftKey && isShortcut("KeyZ", "z")) {
+      claimKey();
+      if (event.repeat) return;
+      undoTableEdit();
+      return;
+    }
+    if ((shortcutModifier && !event.shiftKey && isShortcut("KeyY", "y")) || (shortcutModifier && event.shiftKey && isShortcut("KeyZ", "z"))) {
+      claimKey();
+      if (event.repeat) return;
+      redoTableEdit();
+      return;
+    }
+    if (shortcutModifier && !event.shiftKey && isShortcut("KeyD", "d")) {
+      claimKey();
+      if (event.repeat) return;
+      if (editing) commitEditorForKey();
+      copyDownSelection();
+      return;
+    }
+    if (shortcutModifier && arrowDirection) {
+      claimKey();
+      if (event.repeat) return;
+      if (editing) commitEditorForKey();
+      executeCtrlArrow(arrowDirection, event.shiftKey);
+      return;
+    }
+    if (target && isEditableDomTarget(target) && editing) {
       if (event.key === "Tab") {
         claimKey();
         setEditingCell(null);
@@ -7722,33 +7767,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
         setEditingCell(null);
         focusTableCell(rowIndex, column);
       }
-      return;
-    }
-    const commitEditorForKey = () => commitEditingCell();
-    if (shortcutModifier && !event.shiftKey && event.key.toLowerCase() === "z") {
-      claimKey();
-      if (event.repeat) return;
-      undoTableEdit();
-      return;
-    }
-    if ((shortcutModifier && !event.shiftKey && event.key.toLowerCase() === "y") || (shortcutModifier && event.shiftKey && event.key.toLowerCase() === "z")) {
-      claimKey();
-      if (event.repeat) return;
-      redoTableEdit();
-      return;
-    }
-    if (shortcutModifier && !event.shiftKey && event.key.toLowerCase() === "d") {
-      claimKey();
-      if (event.repeat) return;
-      if (editing) commitEditorForKey();
-      copyDownSelection();
-      return;
-    }
-    if (shortcutModifier && arrowDirection) {
-      claimKey();
-      if (event.repeat) return;
-      if (editing) commitEditorForKey();
-      executeCtrlArrow(arrowDirection, event.shiftKey);
       return;
     }
     if (editing) {
@@ -8115,6 +8133,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
                 onRowContextMenu={(event) => openRowContextMenu(index, event)}
                 onCellFocus={handleCellFocus}
                 onCellPointerDown={handleCellPointerDown}
+                onCellDoubleClick={handleCellDoubleClick}
                 onCellCommitMove={(rowIndex, column) => {
                   setEditingCell(null);
                   moveFromCell(rowIndex, column, 1, 0, false);
@@ -8165,7 +8184,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
 function RowDeleteModal({ rows = [], indexes = [], onClose, onConfirm }) {
   const multiple = indexes.length > 1;
   const firstRow = rows[0] || {};
-  const returnFocusRef = useRef(typeof document !== "undefined" ? document.activeElement : null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   useEffect(() => {
@@ -8178,7 +8196,6 @@ function RowDeleteModal({ rows = [], indexes = [], onClose, onConfirm }) {
     return () => {
       window.removeEventListener("keydown", handleEscape, true);
       cleanupRendererInteractionState();
-      restoreRendererInputFocus({ preferredElement: returnFocusRef.current });
     };
   }, []);
   return (
@@ -8302,7 +8319,7 @@ function DrawingFocusEditor({ row, index, updateRow, onClose }) {
   );
 }
 
-function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptions, smartOptions, priceHistory, drawingEnabled, updateRow, addRow, removeRow, copyFullRow, copyToFollowingRows, hasFollowingRows, invalid = false, selectedRow = false, isCellActive = () => false, isCellSelected = () => false, isCellEditing = () => false, isCellInvalid = () => false, cellValue = (_rowIndex, _column, fallback) => fallback, onCellValueChange = () => {}, onCellBlur = () => {}, onRowSelect = () => {}, onRowContextMenu = () => {}, onCellFocus = () => {}, onCellPointerDown = () => {}, onCellCommitMove = () => {}, onCopyDownCell = () => {}, onRowResize = () => {}, onLearnTableOption = () => {} }) {
+function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptions, smartOptions, priceHistory, drawingEnabled, updateRow, addRow, removeRow, copyFullRow, copyToFollowingRows, hasFollowingRows, invalid = false, selectedRow = false, isCellActive = () => false, isCellSelected = () => false, isCellEditing = () => false, isCellInvalid = () => false, cellValue = (_rowIndex, _column, fallback) => fallback, onCellValueChange = () => {}, onCellBlur = () => {}, onRowSelect = () => {}, onRowContextMenu = () => {}, onCellFocus = () => {}, onCellPointerDown = () => {}, onCellDoubleClick = () => {}, onCellCommitMove = () => {}, onCopyDownCell = () => {}, onRowResize = () => {}, onLearnTableOption = () => {} }) {
   const totals = rowTotals(row);
   const hasLayerSizeDifference = rowHasLayerSizeDifference(row);
   const composingCellRef = useRef("");
@@ -8322,6 +8339,7 @@ function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptio
       tabIndex: isCellEditing(index, column) ? 0 : -1,
       onFocus: (event) => onCellFocus(index, column, event),
       onPointerDown: (event) => onCellPointerDown(index, column, event),
+      onDoubleClick: (event) => onCellDoubleClick(index, column, event),
       onBlur: (event) => onCellBlur(index, column, event),
       onCompositionStart: () => {
         composingCellRef.current = column;
@@ -9642,7 +9660,7 @@ function SinglePanelDrawingEditor({ row, updateRow }) {
       startViewportPan(event);
       return;
     }
-    if (tool === "edge") return;
+    if (tool === "edge" || tool === "partialArch") return;
     const point = tool === "arrow" || tool === "text" ? workspacePointFromEvent(event) : mmFromEvent(event);
     if (tool === "select") {
       setSelectedShapeId(null);
@@ -9808,6 +9826,64 @@ function SinglePanelDrawingEditor({ row, updateRow }) {
     commitOutlinePoints(outlinePoints.filter((point) => point.id !== id));
     setSelectedOutlinePointId(null);
   }
+  function addPartialArch(event, segmentIndex) {
+    preventCancelableDefault(event);
+    event.stopPropagation();
+    if (tool !== "partialArch") return;
+    const sourcePoints = outlinePoints.map((outlinePoint, index) => normalizeOutlinePoint(outlinePoint, index));
+    if (sourcePoints.length < 2) return;
+    const safeIndex = ((Number(segmentIndex) % sourcePoints.length) + sourcePoints.length) % sourcePoints.length;
+    const rotatedPoints = [...sourcePoints.slice(safeIndex), ...sourcePoints.slice(0, safeIndex)];
+    const start = rotatedPoints[0];
+    const end = rotatedPoints[1];
+    if (!start || !end) return;
+    const clickPoint = outlinePointFromEvent(event, baseGeometry);
+    const sx = numberValue(start.x);
+    const sy = numberValue(start.y);
+    const ex = numberValue(end.x);
+    const ey = numberValue(end.y);
+    const dx = ex - sx;
+    const dy = ey - sy;
+    const lengthSquared = Math.max(1, dx * dx + dy * dy);
+    const splitRatio = Math.max(0.12, Math.min(0.82, ((numberValue(clickPoint.x) - sx) * dx + (numberValue(clickPoint.y) - sy) * dy) / lengthSquared));
+    const split = {
+      id: uid(),
+      x: Math.round(sx + dx * splitRatio),
+      y: Math.round(sy + dy * splitRatio),
+      corner: false,
+      mode: "free",
+      halfDiameter: 0,
+      curve: false
+    };
+    const archStartX = numberValue(split.x);
+    const archStartY = numberValue(split.y);
+    const archDx = ex - archStartX;
+    const archDy = ey - archStartY;
+    const archLength = Math.max(1, Math.hypot(archDx, archDy));
+    const normal = { x: -archDy / archLength, y: archDx / archLength };
+    const midpoint = { x: (archStartX + ex) / 2, y: (archStartY + ey) / 2 };
+    const center = { x: baseGeometry.x + baseGeometry.width / 2, y: baseGeometry.y + baseGeometry.height / 2 };
+    const depth = Math.max(24, Math.min(160, archLength * 0.22));
+    const candidateA = { x: midpoint.x + normal.x * depth, y: midpoint.y + normal.y * depth };
+    const candidateB = { x: midpoint.x - normal.x * depth, y: midpoint.y - normal.y * depth };
+    const distanceA = Math.hypot(candidateA.x - center.x, candidateA.y - center.y);
+    const distanceB = Math.hypot(candidateB.x - center.x, candidateB.y - center.y);
+    const peak = distanceA >= distanceB ? candidateA : candidateB;
+    const control = {
+      id: uid(),
+      x: Math.round(clamp(peak.x, baseGeometry.x - 320, baseGeometry.x + baseGeometry.width + 320)),
+      y: Math.round(clamp(peak.y, baseGeometry.y - 320, baseGeometry.y + baseGeometry.height + 320)),
+      corner: false,
+      mode: "curve",
+      halfDiameter: Math.round(depth),
+      curve: true
+    };
+    const next = [rotatedPoints[0], split, control, ...rotatedPoints.slice(1)];
+    commitOutlinePoints(next);
+    setSelectedShapeId(null);
+    setSelectedOutlinePointId(split.id);
+    setTool("edge");
+  }
   function addOutlinePoint(event, segmentIndex) {
     preventCancelableDefault(event);
     event.stopPropagation();
@@ -9828,6 +9904,13 @@ function SinglePanelDrawingEditor({ row, updateRow }) {
     setSelectedShapeId(null);
     setSelectedOutlinePointId(next[pointIndex].id);
     setDrag({ outlinePoint: true, index: pointIndex, canCurve: canCurveOutlinePoint(next, pointIndex) });
+  }
+  function handleOutlineSegmentPointerDown(event, segmentIndex) {
+    if (tool === "partialArch") {
+      addPartialArch(event, segmentIndex);
+      return;
+    }
+    addOutlinePoint(event, segmentIndex);
   }
   function startOutlinePointDrag(event, point, pointIndex) {
     preventCancelableDefault(event);
@@ -9922,6 +10005,7 @@ function SinglePanelDrawingEditor({ row, updateRow }) {
           <button className={tool === "text" ? "active tiny" : "tiny"} title="إضافة نص" onClick={() => setTool("text")}><Pencil size={16} />نص</button>
           <button className={tool === "arrow" ? "active tiny" : "tiny"} title="إضافة سهم أبعاد" onClick={() => setTool("arrow")}><Maximize2 size={16} />أبعاد</button>
           <button className={tool === "edge" ? "active tiny" : "tiny"} title="تعديل نقاط وحواف اللوح" onClick={() => setTool("edge")}><Sparkles size={16} />تعديل النقاط</button>
+          <button className={tool === "partialArch" ? "active tiny" : "tiny"} title="اضغط على الحافة لإضافة نقطة تقسيم ثم منحنى جزئي" onClick={() => setTool("partialArch")}><Sparkles size={16} />قوس جزئي</button>
           <button className="tiny" title="تكبير حول موضع المؤشر" onClick={() => zoomDrawing(1)}>+</button>
           <button className="tiny" title="تصغير حول منتصف العرض" onClick={() => zoomDrawing(-1)}>-</button>
           <button className="tiny" onClick={fitDrawingView}>ملاءمة</button>
@@ -9988,7 +10072,7 @@ function SinglePanelDrawingEditor({ row, updateRow }) {
                     <path d={`M ${geometry.x + geometry.width * .34} ${geometry.y} L ${geometry.x + geometry.width * .94} ${geometry.y + geometry.height}`} stroke="#ffffff" strokeWidth="4" opacity=".28" />
                   </>
                 )}
-                {index === 0 && tool === "edge" && (
+                {index === 0 && (tool === "edge" || tool === "partialArch") && (
                   <g className="outline-edit-guides">
                     <path className="outline-active-path" d={layerPath} />
                     {outlinePoints.map((point, pointIndex) => {
@@ -10008,7 +10092,7 @@ function SinglePanelDrawingEditor({ row, updateRow }) {
                       const segmentCanDrag = !segment.start.corner && !segment.end.corner;
                       return (
                         <g key={`segment-${segment.index}`}>
-                          <polygon className="outline-segment-hit" points={segmentHitPoints(segment)} onPointerDown={(event) => addOutlinePoint(event, segment.index)} />
+                          <polygon className="outline-segment-hit" points={segmentHitPoints(segment)} onPointerDown={(event) => handleOutlineSegmentPointerDown(event, segment.index)} />
                           {segmentCanDrag && <circle className="outline-segment-handle" cx={midX} cy={midY} r="12" onPointerDown={(event) => startOutlineSegmentDrag(event, segment)} />}
                         </g>
                       );

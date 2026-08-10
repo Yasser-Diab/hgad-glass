@@ -59,3 +59,17 @@ test("compact desktop entry layout is scoped away from full desktop and mobile",
   assert.match(styleSource, /\.table-panel:not\(\.fullscreen-table\) > \.panel-head > \.actions\s*\{[\s\S]*repeat\(5,\s*minmax\(0,\s*1fr\)\)/);
   assert.match(styleSource, /> \.table-panel:not\(\.fullscreen-table\)\s*\{[\s\S]*overflow:\s*hidden/);
 });
+
+test("double-glass layer rows have visible section separators", () => {
+  assert.match(styleSource, /\.layers-cell > \.layer-line \+ \.material-line > \*/);
+  assert.match(styleSource, /\.layers-cell > \.material-line \+ \.layer-line > \*/);
+  assert.match(styleSource, /border-top:\s*2px solid color-mix\(in srgb,\s*var\(--gold\) 58%,\s*var\(--table-line\)\)/);
+  assert.match(styleSource, /\.layers-cell > \.material-line > \*\s*\{[\s\S]*var\(--table-cell-alt-bg\)/);
+});
+
+test("status-only mobile layout keeps cards and filters viewport-safe", () => {
+  assert.match(styleSource, /\.status-only-content\s*\{[\s\S]*-webkit-overflow-scrolling:\s*touch/);
+  assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-app-shell\s*\{[\s\S]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)/);
+  assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-filter-row\s*\{[\s\S]*grid-template-columns:\s*1fr/);
+  assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-card-actions\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+});
