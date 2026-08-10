@@ -59,6 +59,25 @@ test("selected cells start editing only from explicit edit actions", () => {
   assert.match(doubleClickHandler, /startEditingCell\(makeTableCell\(rowIndex, column\)\)/);
 });
 
+test("dropdown cells keep Excel selection but open from one click and Space", () => {
+  const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
+  const pointerHandler = sourceSection("function handleCellPointerDown(", "function handleCellDoubleClick(");
+  const doubleClickHandler = sourceSection("function handleCellDoubleClick(", "function columnForRowNear(");
+  const keyHandler = sourceSection("function handleTableKeyDown(", "function handleTablePaste(");
+  const comboSource = sourceSection("function Combo(", "function SearchBox(");
+
+  assert.match(entrySource, /function isDropdownCellColumn\(column = ""\)/);
+  assert.match(entrySource, /\^layer\\d\+\-\(glassType\|company\|thickness\)\$/);
+  assert.match(entrySource, /function openEntryTableDropdown\(rowIndex, column/);
+  assert.match(entrySource, /showPicker/);
+  assert.match(entrySource, /glass-orders-open-combo/);
+  assert.match(pointerHandler, /if \(isDropdownCellColumn\(column\)\) \{[\s\S]*activateDropdownCell\(rowIndex, column\)/);
+  assert.match(doubleClickHandler, /if \(isDropdownCellColumn\(column\)\) \{[\s\S]*activateDropdownCell\(rowIndex, column\)/);
+  assert.match(keyHandler, /event\.key === " " \|\| event\.code === "Space"/);
+  assert.match(keyHandler, /activateDropdownCell\(rowIndex, column\)/);
+  assert.match(comboSource, /node\.addEventListener\("glass-orders-open-combo", forceOpenCombo\)/);
+});
+
 test("smart-table selected-but-not-editing cells use spreadsheet selection affordance", () => {
   const styleSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   assert.match(styleSource, /\.table-control:not\(\.editing-cell\)\s*\{[\s\S]*cursor:\s*cell/);

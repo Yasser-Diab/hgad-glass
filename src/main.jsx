@@ -2971,11 +2971,55 @@ function rowTotals(row) {
 
 function rowHasLayerSizeDifference(row) {
   if (!row?.layers || row.layers.length < 2) return false;
-  const [first, second] = row.layers;
-  return (
-    numberValue(first.width) !== numberValue(second.width) ||
-    numberValue(first.height) !== numberValue(second.height)
-  );
+  const [first] = row.layers;
+  return row.layers.some((layer, index) => index > 0 && (
+    numberValue(layer.width) !== numberValue(first.width) ||
+    numberValue(layer.height) !== numberValue(first.height)
+  ));
+}
+
+function shouldSplitLayersInOrderReport(row = {}) {
+  const mode = row.glassMode || "single";
+  return ["double", "triplex"].includes(mode) && rowHasLayerSizeDifference(row);
+}
+
+function orderReportLayerDescription(layer, layerIndex) {
+  const names = ["الأولى", "الثانية", "الثالثة"];
+  return cleanName(`الطبقة ${names[layerIndex] || layerIndex + 1}: زجاج ${layerText(layer)}`);
+}
+
+function orderReportLineItems(row = {}, index = 0) {
+  const rowNumber = index + 1;
+  const layers = row.layers?.length ? row.layers : [makeLayer()];
+  const pieceCount = rowHasPanels(row) ? rowPanelPhysicalCount(row) : databaseNumber(row.quantity, 1);
+  const totals = rowTotals(row);
+  const rootDescription = rowDescription(row);
+  if (!shouldSplitLayersInOrderReport({ ...row, layers })) {
+    return [{
+      key: row.id || `row-${rowNumber}`,
+      rowNumber,
+      split: false,
+      description: rootDescription,
+      layerDescription: "",
+      code: row.code || "-",
+      width: rowHasPanels(row) ? Number(rowMaxWidthCm(row).toFixed(1)) : Math.max(...layers.map((layer) => numberValue(layer.width))),
+      height: rowHasPanels(row) ? Number(rowMaxHeightCm(row).toFixed(1)) : Math.max(...layers.map((layer) => numberValue(layer.height))),
+      quantity: pieceCount,
+      area: totals.area
+    }];
+  }
+  return layers.map((layer, layerIndex) => ({
+    key: `${row.id || `row-${rowNumber}`}-layer-${layerIndex + 1}`,
+    rowNumber,
+    split: true,
+    description: rootDescription,
+    layerDescription: orderReportLayerDescription(layer, layerIndex),
+    code: row.code || "-",
+    width: numberValue(layer.width),
+    height: numberValue(layer.height),
+    quantity: pieceCount,
+    area: layerAreaM2(layer, pieceCount)
+  }));
 }
 
 function orderTotals(order) {
@@ -4338,7 +4382,6 @@ async function saveOrderToSupabase(client, normalized) {
   const customer = await selectedPartyForPersistence(client, "customers", normalized.customerId, normalized.customerName, "العميل");
   const supplier = await selectedPartyForPersistence(client, "suppliers", normalized.supplierId, normalized.supplierName, "المورد");
   const saveAsExisting = normalized._existingOrder === true;
-  const lockedVisibleOrderNo = !!normalized.orderNo;
   let candidateOrderNo = normalized.orderNo ? displayOrderNo(normalized.orderNo) : await nextSupabaseOrderNo(client);
   let saved = null;
   let savedRows = [];
@@ -4388,7 +4431,8 @@ async function saveOrderToSupabase(client, normalized) {
         if ((rowCheck.count || 0) === 0) {
           existingId = duplicate.data.id;
         } else {
-          throw new Error("رقم الطلب مستخدم بالفعل في طلب آخر. يرجى اختيار رقم مختلف.");
+          candidateOrderNo = await nextSupabaseOrderNo(client, candidateOrderNo);
+          continue;
         }
       } else {
         throw new Error("رقم الطلب مستخدم بالفعل في طلب آخر. يرجى اختيار رقم مختلف.");
@@ -4447,8 +4491,8 @@ async function saveOrderToSupabase(client, normalized) {
     }
     if (!isDuplicateOrderNoError(result.error)) throw result.error;
     console.warn(maskSensitiveText(`Supabase duplicate order number ${candidateOrderNo}: ${safeErrorMessage(result.error)}`));
-    if (lockedVisibleOrderNo) {
-      throw new Error("تعذر حفظ الطلب لأن رقم الطلب المعروض مستخدم بالفعل. لم يتم إنشاء رقم جديد ولم يتم فقد أي من البيانات المدخلة.");
+    if (saveAsExisting || existingId) {
+      throw new Error("رقم الطلب مستخدم بالفعل في طلب آخر. لم يتم تغيير أي من البيانات المدخلة.");
     }
     candidateOrderNo = await nextSupabaseOrderNo(client, candidateOrderNo);
   }
@@ -5480,7 +5524,7 @@ function App() {
           setActiveTab("entry");
           return null;
         }
-        const snapshot = orderSaveSnapshot({ ...sourceDraft, rows: validation.payloadRows });
+        let snapshot = orderSaveSnapshot({ ...sourceDraft, rows: validation.payloadRows });
         let loadedOrderForId = snapshot.id
           ? data.orders.find((order) => order.id === snapshot.id)
           : null;
@@ -5497,9 +5541,10 @@ function App() {
           return null;
         }
         if (!saveAsExisting && duplicateLoadedOrderNo) {
-          setMessage("رقم الطلب مستخدم بالفعل في طلب آخر. يرجى اختيار رقم مختلف.");
-          setActiveTab("entry");
-          return null;
+          snapshot = {
+            ...snapshot,
+            orderNo: generateOrderNo(data.orders, snapshot.date)
+          };
         }
         const persistentOrderId = saveAsExisting
           ? loadedOrderForId.id
@@ -6909,6 +6954,50 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const escapedColumn = window.CSS?.escape ? CSS.escape(String(column)) : String(column).replace(/["\\]/g, "\\$&");
     return `.table-control[data-row="${rowIndex}"][data-col="${escapedColumn}"]`;
   }
+  function isDropdownCellColumn(column = "") {
+    return column === "mode" ||
+      column === "extraDirection" ||
+      column === "doubleGap" ||
+      column === "triplexPvb" ||
+      /^layer\d+-(glassType|company|thickness)$/.test(String(column || ""));
+  }
+  function openEntryTableDropdown(rowIndex, column, attempt = 0) {
+    const target = document.querySelector(tableControlSelector(rowIndex, column));
+    if (!target) {
+      if (attempt < 8) window.setTimeout(() => openEntryTableDropdown(rowIndex, column, attempt + 1), 30);
+      return false;
+    }
+    target.closest(".table-entry")?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    if (target.tagName === "SELECT") {
+      target.focus?.();
+      try {
+        if (typeof target.showPicker === "function") target.showPicker();
+        else target.click?.();
+      } catch {
+        target.click?.();
+      }
+      return true;
+    }
+    const combo = target.closest?.(".combo");
+    if (combo) {
+      target.focus?.();
+      combo.dispatchEvent(new CustomEvent("glass-orders-open-combo", { bubbles: false }));
+      return true;
+    }
+    restoreRendererInputFocus({ preferredElement: target });
+    return true;
+  }
+  function activateDropdownCell(rowIndex, column) {
+    const nextCell = makeTableCell(rowIndex, column);
+    if (editingCell && !sameTableCell(editingCell, nextCell)) {
+      commitEditingCell();
+    }
+    setSelectedRowIds([]);
+    setActiveCell(nextCell);
+    setSelectedRange({ anchor: nextCell, focus: nextCell });
+    setEditingCell(nextCell);
+    window.requestAnimationFrame(() => openEntryTableDropdown(rowIndex, column));
+  }
   function focusEntryTableControl(rowIndex, column = "rowCode", attempt = 0, options = {}) {
     const fallbackColumns = options.exact ? [column] : [column, "rowCode", "notes", "quantity", "mode"];
     const selectors = fallbackColumns.map((item) => tableControlSelector(rowIndex, item)).join(", ");
@@ -7443,6 +7532,11 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   function handleCellPointerDown(rowIndex, column, event) {
     if (event.button !== 0) return;
     const nextCell = makeTableCell(rowIndex, column);
+    if (isDropdownCellColumn(column)) {
+      event.stopPropagation();
+      activateDropdownCell(rowIndex, column);
+      return;
+    }
     if (editingCell && !sameTableCell(editingCell, nextCell)) {
       commitEditingCell();
     }
@@ -7455,6 +7549,10 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   function handleCellDoubleClick(rowIndex, column, event) {
     preventCancelableDefault(event);
     event.stopPropagation();
+    if (isDropdownCellColumn(column)) {
+      activateDropdownCell(rowIndex, column);
+      return;
+    }
     startEditingCell(makeTableCell(rowIndex, column));
   }
   function columnForRowNear(rowIndex, column, fallbackColumnIndex = 0) {
@@ -7815,6 +7913,11 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (!editing && event.key === "Delete" && selectedRowIds.length) {
       claimKey();
       requestRemoveRows(selectedRowIndexes());
+      return;
+    }
+    if (!editing && isDropdownCellColumn(column) && (event.key === " " || event.code === "Space")) {
+      claimKey();
+      activateDropdownCell(rowIndex, column);
       return;
     }
     if (event.key === "Escape") {
@@ -11626,12 +11729,20 @@ function OrderReport({ order, currentUser, logoSrc }) {
       {!includeDrawingPages && (
         <div className="report-table order-report-table">
           <div className="report-row order-report-row head"><span>NO.</span><span className="description-header">البيان</span><span className="code-header">الكود</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
-          {reportRows.map((row, index) => {
-            const t = rowTotals(row);
-            const maxW = Math.max(...row.layers.map((layer) => numberValue(layer.width)));
-            const maxH = Math.max(...row.layers.map((layer) => numberValue(layer.height)));
-            return <div className="report-row order-report-row" key={row.id}><span className="keep-line">{index + 1}</span><span className="report-description description-cell" dir="rtl"><bdi><ArabicMixedText value={rowDescription(row)} /></bdi></span><span dir="ltr" className="keep-line code-cell">{row.code || "-"}</span><span className="keep-line">{maxW}</span><span className="keep-line">{maxH}</span><span className="keep-line">{row.quantity}</span><span className="keep-line">{square(t.area)}</span></div>;
-          })}
+          {reportRows.flatMap((row, index) => orderReportLineItems(row, index)).map((line) => (
+            <div className={line.split ? "report-row order-report-row split-layer-report-row" : "report-row order-report-row"} key={line.key}>
+              <span className="keep-line">{line.rowNumber}</span>
+              <span className={line.split ? "report-description description-cell split-layer-description" : "report-description description-cell"} dir="rtl">
+                <bdi><ArabicMixedText value={line.description} /></bdi>
+                {line.layerDescription && <small><ArabicMixedText value={line.layerDescription} /></small>}
+              </span>
+              <span dir="ltr" className="keep-line code-cell">{line.code}</span>
+              <span className="keep-line">{line.width}</span>
+              <span className="keep-line">{line.height}</span>
+              <span className="keep-line">{line.quantity}</span>
+              <span className="keep-line">{square(line.area)}</span>
+            </div>
+          ))}
           <div className="report-row order-report-row subtotal"><span></span><span className="subtotal-label description-cell">الإجمالي</span><span className="code-cell"></span><span></span><span></span><span className="keep-line">{money(totals.pieces)}</span><span className="keep-line">{square(totals.area)}</span></div>
         </div>
       )}
@@ -11648,11 +11759,8 @@ function OrderReport({ order, currentUser, logoSrc }) {
 function DrawingReportPage({ row, index, order = {}, issueDateText = "" }) {
   const fabricationNotes = drawingFabricationNotes(row);
   const notes = fabricationNotes.length ? fabricationNotes : ["لوح مسطح بدون قص أو ثقوب إضافية."];
-  const totals = rowTotals(row);
   const panels = rowHasPanels(row) ? rowDrawingPanels(row) : [];
-  const maxW = rowHasPanels(row) ? Number(rowMaxWidthCm(row).toFixed(1)) : Math.max(...row.layers.map((layer) => numberValue(layer.width)));
-  const maxH = rowHasPanels(row) ? Number(rowMaxHeightCm(row).toFixed(1)) : Math.max(...row.layers.map((layer) => numberValue(layer.height)));
-  const pieceCount = rowPanelPhysicalCount(row);
+  const reportLines = orderReportLineItems(row, index);
   return (
     <div className="drawing-page">
       <div className="drawing-page-header">
@@ -11661,7 +11769,20 @@ function DrawingReportPage({ row, index, order = {}, issueDateText = "" }) {
       </div>
       <div className="report-table order-report-table drawing-item-table">
         <div className="report-row order-report-row head"><span>NO.</span><span className="description-header">البيان</span><span className="code-header">الكود</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
-        <div className="report-row order-report-row"><span className="keep-line">{index + 1}</span><span className="report-description description-cell" dir="rtl"><bdi><ArabicMixedText value={rowDescription(row)} /></bdi></span><span dir="ltr" className="keep-line code-cell">{row.code || "-"}</span><span className="keep-line">{maxW}</span><span className="keep-line">{maxH}</span><span className="keep-line">{pieceCount}</span><span className="keep-line">{square(totals.area)}</span></div>
+        {reportLines.map((line) => (
+          <div className={line.split ? "report-row order-report-row split-layer-report-row" : "report-row order-report-row"} key={line.key}>
+            <span className="keep-line">{line.rowNumber}</span>
+            <span className={line.split ? "report-description description-cell split-layer-description" : "report-description description-cell"} dir="rtl">
+              <bdi><ArabicMixedText value={line.description} /></bdi>
+              {line.layerDescription && <small><ArabicMixedText value={line.layerDescription} /></small>}
+            </span>
+            <span dir="ltr" className="keep-line code-cell">{line.code}</span>
+            <span className="keep-line">{line.width}</span>
+            <span className="keep-line">{line.height}</span>
+            <span className="keep-line">{line.quantity}</span>
+            <span className="keep-line">{square(line.area)}</span>
+          </div>
+        ))}
       </div>
       {panels.length ? (
         <>
@@ -14176,6 +14297,17 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
     const active = optionRefs.current[activeIndex];
     active?.scrollIntoView?.({ block: "nearest" });
   }, [activeIndex, open]);
+  useEffect(() => {
+    const node = wrapRef.current;
+    if (!node) return undefined;
+    function forceOpenCombo() {
+      window.clearTimeout(openTimerRef.current);
+      setOpen(true);
+      window.requestAnimationFrame(() => inputRef.current?.focus?.());
+    }
+    node.addEventListener("glass-orders-open-combo", forceOpenCombo);
+    return () => node.removeEventListener("glass-orders-open-combo", forceOpenCombo);
+  }, []);
   useEffect(() => {
     if (!open) return undefined;
     function updatePlacement() {

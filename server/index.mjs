@@ -598,7 +598,6 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
   const status = normalizeOrderStatus(order.status);
   const saveAsExisting = order._existingOrder === true;
   const managesTransaction = options.externalTransaction !== true;
-  const lockedVisibleOrderNo = !!order.orderNo;
   let candidateOrderNo = order.orderNo ? displayOrderNo(order.orderNo) : await nextOrderNoAfter("");
   for (let attempt = 0; attempt < 8; attempt += 1) {
     let savedId = clean(order.id);
@@ -633,7 +632,8 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
             savedId = duplicateId;
           } else {
             if (managesTransaction) await db.exec("rollback");
-            throw new Error("رقم الطلب مستخدم بالفعل في طلب آخر. يرجى اختيار رقم مختلف.");
+            candidateOrderNo = await nextOrderNoAfter(candidateOrderNo);
+            continue;
           }
         } else {
           if (managesTransaction) await db.exec("rollback");
@@ -799,8 +799,7 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
         try { await db.exec("rollback"); } catch { /* Transaction may already be closed. */ }
       }
       if (!managesTransaction) throw error;
-      if (!duplicateOrderNoError(error) || clean(order.id)) throw error;
-      if (lockedVisibleOrderNo) throw new Error("تعذر حفظ الطلب لأن رقم الطلب المعروض مستخدم بالفعل. لم يتم إنشاء رقم جديد ولم يتم فقد أي من البيانات المدخلة.");
+      if (!duplicateOrderNoError(error) || saveAsExisting) throw error;
       candidateOrderNo = await nextOrderNoAfter(candidateOrderNo);
     }
   }

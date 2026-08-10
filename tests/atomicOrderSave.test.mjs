@@ -60,6 +60,25 @@ test("delete Undo restores through the same full-order save path", () => {
   assert.match(mainSource, /saveOrderToSupabase\(client,\s*normalized\)/);
 });
 
+test("automatic order numbers retry on new-order collisions instead of blocking the user", () => {
+  const supabaseSaveSource = sourceFunction("saveOrderToSupabase", "deleteOrderFromSupabase");
+  const saveDraftStart = mainSource.indexOf("async function saveDraft(");
+  const saveDraftEnd = mainSource.indexOf("async function previewDraftOrder", saveDraftStart);
+  const saveDraftSource = mainSource.slice(saveDraftStart, saveDraftEnd);
+  const localServerSource = readFileSync(new URL("../server/index.mjs", import.meta.url), "utf8");
+  const localSaveStart = localServerSource.indexOf("async function saveOrder(");
+  const localSaveEnd = localServerSource.indexOf("async function patchOrderStatus", localSaveStart);
+  const localSaveSource = localServerSource.slice(localSaveStart, localSaveEnd);
+
+  assert.doesNotMatch(supabaseSaveSource, /lockedVisibleOrderNo/);
+  assert.doesNotMatch(localSaveSource, /lockedVisibleOrderNo/);
+  assert.match(supabaseSaveSource, /candidateOrderNo = await nextSupabaseOrderNo\(client, candidateOrderNo\);\s*continue;/);
+  assert.match(supabaseSaveSource, /if \(saveAsExisting \|\| existingId\)/);
+  assert.match(saveDraftSource, /if \(!saveAsExisting && duplicateLoadedOrderNo\) \{[\s\S]*orderNo: generateOrderNo\(data\.orders, snapshot\.date\)/);
+  assert.match(localSaveSource, /candidateOrderNo = await nextOrderNoAfter\(candidateOrderNo\);\s*continue;/);
+  assert.match(localSaveSource, /if \(!duplicateOrderNoError\(error\) \|\| saveAsExisting\) throw error/);
+});
+
 test("validation migration remains the private base and the authoritative schema exposes the integrity wrapper", () => {
   assert.equal(canonicalAtomicSql(schemaSource), canonicalAtomicSql(integrityMigrationSource));
   assert.match(validationMigrationSource, /security definer/);

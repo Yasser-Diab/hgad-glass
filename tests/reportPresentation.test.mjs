@@ -64,6 +64,25 @@ test("Orders Status preview uses an isolated toolbar and width-safe report grid"
   assert.match(styleSource, /\.order-status-report-row \.keep-line\s*\{[\s\S]*word-break:\s*normal/);
 });
 
+test("order report splits only unequal double or triplex layer measurements into child layer rows", () => {
+  const orderReport = sourceBetween("function OrderReport(", "function DrawingReportPage(");
+  const drawingReport = sourceBetween("function DrawingReportPage(", "function PanelOverallLayoutPreview(");
+  const layerSplitHelpers = sourceBetween("function rowHasLayerSizeDifference(", "function orderTotals(");
+
+  assert.match(layerSplitHelpers, /function shouldSplitLayersInOrderReport\(row = \{\}\)/);
+  assert.match(layerSplitHelpers, /\["double", "triplex"\]\.includes\(mode\) && rowHasLayerSizeDifference\(row\)/);
+  assert.match(layerSplitHelpers, /row\.layers\.some\(\(layer, index\) => index > 0/);
+  assert.match(layerSplitHelpers, /function orderReportLineItems\(row = \{\}, index = 0\)/);
+  assert.match(layerSplitHelpers, /layerAreaM2\(layer, pieceCount\)/);
+  assert.match(layerSplitHelpers, /orderReportLayerDescription\(layer, layerIndex\)/);
+  assert.match(orderReport, /reportRows\.flatMap\(\(row, index\) => orderReportLineItems\(row, index\)\)/);
+  assert.match(orderReport, /split-layer-report-row/);
+  assert.match(drawingReport, /const reportLines = orderReportLineItems\(row, index\)/);
+  assert.match(drawingReport, /reportLines\.map\(\(line\) =>/);
+  assert.match(styleSource, /\.split-layer-report-row > span/);
+  assert.match(styleSource, /\.split-layer-description small/);
+});
+
 test("compact desktop entry layout is scoped away from full desktop and mobile", () => {
   assert.match(appSource, /className="panel entry-order-panel"/);
   assert.match(appSource, /"stack",\s*"entry-screen"/);

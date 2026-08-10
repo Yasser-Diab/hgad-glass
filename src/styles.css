@@ -3541,6 +3541,23 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
     minmax(44px, .5fr)
     minmax(52px, .62fr);
 }
+.split-layer-report-row > span {
+  background: color-mix(in srgb, var(--report-row-background) 88%, #eaf3ff);
+}
+.split-layer-report-row + .split-layer-report-row > span {
+  border-top-style: dashed;
+}
+.split-layer-description {
+  align-items: flex-start;
+  gap: 3px;
+  line-height: 1.35;
+}
+.split-layer-description small {
+  display: block;
+  color: #35506b;
+  font-size: .82em;
+  font-weight: 800;
+}
 .order-report-row.subtotal .subtotal-label {
   text-align: center;
   justify-content: center;
