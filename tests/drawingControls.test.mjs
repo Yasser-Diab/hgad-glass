@@ -25,3 +25,20 @@ test("single-panel drawing exposes an explicit partial-arch edge tool", () => {
   assert.match(partialArch, /mode: "curve"/);
   assert.match(partialArch, /\[rotatedPoints\[0\], split, control, \.\.\.rotatedPoints\.slice\(1\)\]/);
 });
+
+test("multi-panel drawing reuses edge-point and partial-arch controls", () => {
+  const editor = sourceSection("function MultiPanelDrawingEditor(", "function SinglePanelDrawingEditor(");
+  const partialArch = sourceSection("function addPanelPartialArch(", "function addPanelOutlinePoint(");
+
+  assert.match(editor, /selectedOutlinePointId/);
+  assert.match(editor, /\["edge", "نقاط", Sparkles\]/);
+  assert.match(editor, /\["partialArch", "قوس جزئي", Sparkles\]/);
+  assert.match(editor, /tool === "edge" \|\| tool === "partialArch"/);
+  assert.match(editor, /handlePanelOutlineSegmentPointerDown\(panel, event, segment\.index\)/);
+  assert.match(editor, /kind: "panelOutlinePoint"/);
+  assert.match(editor, /deleteSelectedPanelOutlinePoint/);
+  assert.match(partialArch, /const split = \{/);
+  assert.match(partialArch, /const control = \{/);
+  assert.match(partialArch, /mode: "curve"/);
+  assert.match(partialArch, /\[rotatedPoints\[0\], split, control, \.\.\.rotatedPoints\.slice\(1\)\]/);
+});

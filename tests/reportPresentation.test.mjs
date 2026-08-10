@@ -38,16 +38,30 @@ test("print and PDF clones physically remove report edit controls", () => {
 
 test("Orders Status preview uses an isolated toolbar and width-safe report grid", () => {
   const previewModal = sourceBetween("function PreviewModal(", "function OrderReport(");
+  const orderStatusFileBase = sourceBetween("function orderStatusReportFileBase(", "function readJsonSetting(");
+  const orderStatusExcel = sourceBetween("async function exportOrderStatusExcel(", "async function exportStatementPdf(");
+  const orderStatusPdf = sourceBetween("async function exportOrderStatusPdf(", "function exportPreviewExcel(");
   assert.match(previewModal, /report-preview-modal/);
   assert.match(previewModal, /report-preview-toolbar/);
   assert.match(previewModal, /report-preview-scroll/);
   assert.match(previewModal, /order-status-preview-page/);
+  assert.match(previewModal, /orderStatusReportFileBase\(preview\.report\)/);
+  assert.match(orderStatusFileBase, /supplierPart/);
+  assert.match(orderStatusFileBase, /statusPart/);
+  assert.match(orderStatusFileBase, /تقرير حالة الطلبات - \$\{supplierPart\} - \$\{statusPart\}/);
+  assert.match(orderStatusExcel, /orderStatusReportFileBase\(safeReport\)/);
+  assert.match(orderStatusPdf, /orderStatusReportFileBase\(safeReport\)/);
+  assert.doesNotMatch(orderStatusExcel, /OrdersStatus\.xlsx/);
+  assert.doesNotMatch(orderStatusPdf, /OrdersStatus\.pdf/);
 
   assert.match(styleSource, /\.report-preview-modal\s*\{[\s\S]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)/);
   assert.match(styleSource, /\.report-preview-scroll\s*\{[\s\S]*overflow:\s*auto/);
   assert.match(styleSource, /\.order-status-report-table\.without-cost \.order-status-report-row\s*\{[\s\S]*minmax\(0,\s*2\.14fr\)/);
   assert.match(styleSource, /\.order-status-report-table\.with-cost \.order-status-report-row\s*\{[\s\S]*minmax\(0,\s*1\.94fr\)/);
   assert.match(styleSource, /\.order-status-report-row\.supplier-subtotal\s*\{[\s\S]*border-block/);
+  assert.match(styleSource, /\.order-status-report-row > span,\s*\.order-status-report-row > \.report-glass-breakdown\s*\{[\s\S]*border-inline-start/);
+  assert.match(styleSource, /\.order-status-report-row > span,\s*\.order-status-report-row > \.report-glass-breakdown\s*\{[\s\S]*overflow-wrap:\s*break-word/);
+  assert.match(styleSource, /\.order-status-report-row \.keep-line\s*\{[\s\S]*word-break:\s*normal/);
 });
 
 test("compact desktop entry layout is scoped away from full desktop and mobile", () => {
@@ -72,4 +86,20 @@ test("status-only mobile layout keeps cards and filters viewport-safe", () => {
   assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-app-shell\s*\{[\s\S]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)/);
   assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-filter-row\s*\{[\s\S]*grid-template-columns:\s*1fr/);
   assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-card-actions\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+});
+
+test("mobile full order-entry layout does not keep the main form sticky over the table", () => {
+  assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.workspace > \.entry-screen > \.entry-order-panel\s*\{[\s\S]*position:\s*static/);
+  assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.table-panel > \.panel-head\s*\{[\s\S]*position:\s*static/);
+  assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.entry-order-panel > \.panel-head > \.actions\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+});
+
+test("appearance logo changes support admin global persistence and user local overrides", () => {
+  const settingsView = sourceBetween("function SettingsView(", "function Field(");
+  assert.match(appSource, /const APPEARANCE_GLOBAL_SETTING_KEY = "appearance"/);
+  assert.match(appSource, /function loadGlobalAppearanceSettings\(/);
+  assert.match(appSource, /function persistGlobalAppearancePatch\(/);
+  assert.match(appSource, /function mergeAppearanceSettings\(globalSettings = \{\}, localSettings = \{\}\)/);
+  assert.match(settingsView, /globalLogo/);
+  assert.match(settingsView, /persistGlobalAppearancePatch\(\{ reportLogoDataUrl/);
 });

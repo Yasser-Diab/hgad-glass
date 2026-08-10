@@ -760,6 +760,10 @@ textarea { min-height: 96px; resize: vertical; }
 .order-validation-summary span { color: var(--muted); }
 .order-validation-summary ul { margin: 2px 18px 0 0; padding: 0; }
 .order-validation-summary li { margin: 2px 0; }
+.order-validation-summary li.resolved {
+  color: #16a34a;
+  font-weight: 800;
+}
 .search-box {
   min-width: min(360px, 100%);
   display: flex;
@@ -1193,6 +1197,14 @@ textarea { min-height: 96px; resize: vertical; }
   background-color: color-mix(in srgb, var(--table-cell-bg) 82%, var(--field-bg));
   color: var(--table-cell-text);
   border-color: transparent;
+}
+.table-control:not(.editing-cell) {
+  cursor: cell;
+  caret-color: transparent;
+}
+.table-control.editing-cell {
+  cursor: text;
+  caret-color: auto;
 }
 .table-entry:nth-of-type(even) .table-control,
 .table-entry:nth-of-type(even) input,
@@ -3782,16 +3794,22 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   min-width: 0;
   max-width: 100%;
 }
-.order-status-report-row > span {
+.order-status-report-row > span,
+.order-status-report-row > .report-glass-breakdown {
   padding: 7px 5px;
   white-space: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   word-break: normal;
+  letter-spacing: 0;
+  border-inline-start: 1px solid var(--report-border);
+  border-bottom: 1px solid var(--report-border);
+  color: inherit;
 }
 .order-status-report-row.head > span,
 .order-status-report-row .keep-line {
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .report-glass-breakdown {
   min-width: 0;
@@ -3812,7 +3830,9 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
 .report-glass-breakdown strong,
 .report-glass-breakdown span {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
+  letter-spacing: 0;
 }
 .report-glass-breakdown span {
   color: var(--report-muted-text);
@@ -5777,6 +5797,80 @@ pre {
   .status-filters { grid-template-columns: 1fr; }
   .workspace > .stack > .panel:first-child {
     top: 0;
+  }
+  [data-active-tab="entry"] .workspace {
+    padding: 8px;
+  }
+  .workspace > .entry-screen > .entry-order-panel {
+    position: static;
+    top: auto;
+    z-index: auto;
+    box-shadow: var(--shadow);
+  }
+  .entry-screen {
+    gap: 9px;
+    padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  }
+  .entry-order-panel {
+    padding: 10px;
+  }
+  .entry-order-panel > .panel-head {
+    gap: 8px;
+    margin-bottom: 9px;
+    padding-bottom: 8px;
+  }
+  .entry-order-panel > .panel-head h2 {
+    font-size: 19px;
+  }
+  .entry-order-panel > .panel-head p {
+    font-size: 13px;
+    line-height: 1.35;
+  }
+  .entry-order-panel > .panel-head > .actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .entry-order-panel > .panel-head > .actions > button {
+    min-width: 0;
+    min-height: 38px;
+    padding: 7px 8px;
+    justify-content: center;
+    font-size: 13px;
+  }
+  .entry-order-panel > .panel-head > .actions > .primary {
+    grid-column: 1 / -1;
+    min-height: 40px;
+  }
+  .entry-order-panel .form-grid {
+    gap: 8px;
+  }
+  .entry-order-panel .field {
+    gap: 4px;
+  }
+  .entry-order-panel input,
+  .entry-order-panel select {
+    min-height: 42px;
+  }
+  .table-panel {
+    padding: 10px;
+  }
+  .table-panel > .panel-head {
+    position: static;
+    top: auto;
+    z-index: auto;
+    box-shadow: none;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .table-panel > .panel-head > .actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .table-panel > .panel-head > .actions > button,
+  .table-panel > .panel-head > .actions .entry-paste-controls {
+    min-width: 0;
   }
   .sidebar {
     padding: 8px 10px;

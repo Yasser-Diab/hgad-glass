@@ -55,7 +55,15 @@ test("selected cells start editing only from explicit edit actions", () => {
   assert.match(entrySource, /onCellDoubleClick=\{handleCellDoubleClick\}/);
   assert.match(pointerHandler, /setEditingCell\(null\)/);
   assert.doesNotMatch(pointerHandler, /setEditingCell\(nextCell\)/);
+  assert.match(pointerHandler, /beginRangeDrag\(rowIndex, column, event\)/);
   assert.match(doubleClickHandler, /startEditingCell\(makeTableCell\(rowIndex, column\)\)/);
+});
+
+test("smart-table selected-but-not-editing cells use spreadsheet selection affordance", () => {
+  const styleSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  assert.match(styleSource, /\.table-control:not\(\.editing-cell\)\s*\{[\s\S]*cursor:\s*cell/);
+  assert.match(styleSource, /\.table-control:not\(\.editing-cell\)\s*\{[\s\S]*caret-color:\s*transparent/);
+  assert.match(styleSource, /\.table-control\.editing-cell\s*\{[\s\S]*cursor:\s*text/);
 });
 
 test("manual numeric input preserves decimal separators while typing", () => {

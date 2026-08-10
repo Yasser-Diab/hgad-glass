@@ -329,6 +329,11 @@ const DEFAULT_APPEARANCE = {
   ...THEME_PRESETS.gold.values
 };
 
+const APPEARANCE_STORAGE_KEY = "glassOrdersAppearance";
+const APPEARANCE_GLOBAL_CACHE_KEY = "glassOrdersAppearanceGlobal";
+const APPEARANCE_USER_STORAGE_PREFIX = "glassOrdersAppearanceUser";
+const APPEARANCE_GLOBAL_SETTING_KEY = "appearance";
+
 const LEARNED_TABLE_OPTIONS_KEY = "glassOrdersLearnedTableOptions";
 const LEARNED_TABLE_OPTION_LIMIT = 220;
 const EMPTY_LEARNED_TABLE_OPTIONS = {
@@ -1115,12 +1120,32 @@ function statusClassName(value) {
   return `status-chip ${orderStatusDef(value).tone}`;
 }
 
-function readAppearanceSettings() {
+function readStoredJson(key, fallback = {}) {
   try {
-    return { ...DEFAULT_APPEARANCE, ...(JSON.parse(localStorage.getItem("glassOrdersAppearance") || "{}")) };
+    return { ...fallback, ...(JSON.parse(localStorage.getItem(key) || "{}")) };
   } catch {
-    return DEFAULT_APPEARANCE;
+    return { ...fallback };
   }
+}
+
+function appearanceStorageKey(user = null) {
+  const id = cleanName(user?.id || user?.auth_user_id || user?.username || "");
+  return id ? `${APPEARANCE_USER_STORAGE_PREFIX}:${id}` : APPEARANCE_STORAGE_KEY;
+}
+
+function mergeAppearanceSettings(globalSettings = {}, localSettings = {}) {
+  const merged = { ...DEFAULT_APPEARANCE, ...globalSettings, ...localSettings };
+  if (!cleanName(localSettings.reportLogoDataUrl) && cleanName(globalSettings.reportLogoDataUrl)) {
+    merged.reportLogoDataUrl = globalSettings.reportLogoDataUrl;
+  }
+  return normalizeReportPalette(merged);
+}
+
+function readAppearanceSettings(user = null) {
+  const globalSettings = readStoredJson(APPEARANCE_GLOBAL_CACHE_KEY, {});
+  const legacyLocalSettings = readStoredJson(APPEARANCE_STORAGE_KEY, {});
+  const userLocalSettings = user ? readStoredJson(appearanceStorageKey(user), legacyLocalSettings) : legacyLocalSettings;
+  return mergeAppearanceSettings(globalSettings, userLocalSettings);
 }
 
 function hexToRgb(value = "") {
@@ -1190,8 +1215,45 @@ function normalizeReportPalette(settings = {}) {
   };
 }
 
-function persistAppearanceSettings(settings) {
-  localStorage.setItem("glassOrdersAppearance", JSON.stringify(settings));
+function persistAppearanceSettings(settings, user = null) {
+  localStorage.setItem(appearanceStorageKey(user), JSON.stringify(settings));
+  if (!user) localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(settings));
+}
+
+async function loadGlobalAppearanceSettings() {
+  const client = hasSupabaseConfig() ? getSupabaseClient() : null;
+  if (!client) return {};
+  const result = await client
+    .from("app_settings")
+    .select("value")
+    .eq("key", APPEARANCE_GLOBAL_SETTING_KEY)
+    .maybeSingle();
+  if (result.error) throw result.error;
+  const value = result.data?.value && typeof result.data.value === "object" ? result.data.value : {};
+  localStorage.setItem(APPEARANCE_GLOBAL_CACHE_KEY, JSON.stringify(value));
+  return value;
+}
+
+async function persistGlobalAppearancePatch(patchValue = {}) {
+  const client = hasSupabaseConfig() ? getSupabaseClient() : null;
+  if (!client) throw new Error("الاتصال غير متاح لحفظ الشعار العام.");
+  let currentValue = {};
+  const existing = await client
+    .from("app_settings")
+    .select("value")
+    .eq("key", APPEARANCE_GLOBAL_SETTING_KEY)
+    .maybeSingle();
+  if (existing.error) throw existing.error;
+  if (existing.data?.value && typeof existing.data.value === "object") currentValue = existing.data.value;
+  const value = { ...currentValue, ...patchValue };
+  const result = await client
+    .from("app_settings")
+    .upsert({ key: APPEARANCE_GLOBAL_SETTING_KEY, value, updated_at: new Date().toISOString() }, { onConflict: "key" })
+    .select("value")
+    .single();
+  if (result.error) throw result.error;
+  localStorage.setItem(APPEARANCE_GLOBAL_CACHE_KEY, JSON.stringify(value));
+  return value;
 }
 
 function applyAppearanceSettings(settings = DEFAULT_APPEARANCE) {
@@ -5137,8 +5199,22 @@ function App() {
 
   useEffect(() => {
     applyAppearanceSettings(appearance);
-    persistAppearanceSettings(appearance);
-  }, [appearance]);
+    persistAppearanceSettings(appearance, currentUser);
+  }, [appearance, currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser || !hasSupabaseConfig()) return undefined;
+    let cancelled = false;
+    loadGlobalAppearanceSettings()
+      .then((globalSettings) => {
+        if (cancelled) return;
+        setAppearance(mergeAppearanceSettings(globalSettings, readStoredJson(appearanceStorageKey(currentUser), readStoredJson(APPEARANCE_STORAGE_KEY, {}))));
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.id]);
 
   useEffect(() => {
     if (!loading) restoreRendererInputFocus();
@@ -6784,9 +6860,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const normalized = cleanName(value).toLocaleLowerCase();
     const selected = (parties || []).find((party) => cleanName(party.name).toLocaleLowerCase() === normalized);
     patch({ [nameField]: value, [idField]: selected?.id || "" });
-    if (cleanName(value)) {
-      setValidationErrors((current) => current.filter((error) => error.field !== idField && error.focusField !== nameField.replace(/Name$/, "")));
-    }
   }
   function rememberRows(rows, options = {}) {
     const editKey = editingCell ? `${editingCell.rowId || editingCell.row}:${editingCell.column}` : "";
@@ -6908,13 +6981,6 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (isEditingCell(rowIndex, column)) {
       setEditingCell(null);
     }
-    const currentRow = draftRef.current?.rows?.[rowIndex];
-    if (!currentRow?.id || !validationErrors.some((error) => error.scope === "row" && error.rowId === currentRow.id)) return;
-    const currentErrors = validateOrderRowForSave(currentRow, rowIndex);
-    setValidationErrors((existing) => [
-      ...existing.filter((error) => error.scope !== "row" || error.rowId !== currentRow.id),
-      ...currentErrors
-    ]);
   }
   function setCellValue(rowIndex, column, value, options = {}) {
     setInvalidRowIndex(null);
@@ -7380,21 +7446,11 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (editingCell && !sameTableCell(editingCell, nextCell)) {
       commitEditingCell();
     }
-    if (!event.shiftKey) {
-      preventCancelableDefault(event);
-      event.stopPropagation();
-      setSelectedRowIds([]);
-      setActiveCell(nextCell);
-      setSelectedRange({ anchor: nextCell, focus: nextCell });
-      setEditingCell(null);
-      window.requestAnimationFrame(() => focusTableShell());
-      return;
-    }
     preventCancelableDefault(event);
     event.stopPropagation();
     setEditingCell(null);
     beginRangeDrag(rowIndex, column, event);
-    focusTableShell();
+    window.requestAnimationFrame(() => focusTableShell());
   }
   function handleCellDoubleClick(rowIndex, column, event) {
     preventCancelableDefault(event);
@@ -7969,8 +8025,25 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     tableFullScreen ? "table-fullscreen-active" : "",
     drawingFocusIndex >= 0 ? "drawing-mode-active" : ""
   ].filter(Boolean).join(" ");
-  const validationKeys = new Set(validationErrors.map(validationErrorKey));
-  const invalidRowIds = new Set(validationErrors.filter((error) => error.scope === "row").map((error) => error.rowId));
+  function isValidationErrorResolved(error = {}) {
+    const currentDraft = draftRef.current || draft;
+    if (error.scope === "order") {
+      if (error.field === "customerId") return !!cleanName(currentDraft.customerName);
+      if (error.field === "supplierId") return !!cleanName(currentDraft.supplierName);
+      if (error.field === "date") return !!cleanName(currentDraft.date);
+      return !!cleanName(currentDraft[error.field]);
+    }
+    const rows = currentDraft.rows || [];
+    const rowIndex = rows.findIndex((row) => String(row.id || "") === String(error.rowId || ""));
+    const resolvedIndex = rowIndex >= 0 ? rowIndex : error.rowIndex;
+    const row = rows[resolvedIndex];
+    if (!row) return false;
+    const currentRowErrors = validateOrderRowForSave(row, resolvedIndex).map(validationErrorKey);
+    return !currentRowErrors.includes(validationErrorKey({ ...error, rowId: row.id || error.rowId }));
+  }
+  const unresolvedValidationErrors = validationErrors.filter((error) => !isValidationErrorResolved(error));
+  const validationKeys = new Set(unresolvedValidationErrors.map(validationErrorKey));
+  const invalidRowIds = new Set(unresolvedValidationErrors.filter((error) => error.scope === "row").map((error) => error.rowId));
   const isValidationCellInvalid = (rowIndex, column) => {
     const rowId = draft.rows[rowIndex]?.id || `local-row-${rowIndex}`;
     return validationKeys.has(`${rowId}:${column}`);
@@ -7994,16 +8067,16 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
         {validationErrors.length > 0 && (
           <div className="order-validation-summary" role="alert" aria-live="assertive">
             <strong>تعذر حفظ الطلب لوجود بيانات مطلوبة غير مكتملة.</strong>
-            <span>استكمل الحقول المحددة ثم أعد الحفظ. لم يتم حذف أو حفظ أي بيانات.</span>
-            <ul>{[...new Set(validationErrors.map((error) => error.message))].slice(0, 6).map((message) => <li key={message}>{message}</li>)}</ul>
+            <span>{unresolvedValidationErrors.length ? "استكمل الحقول المحددة. كل بند يتم إصلاحه سيظهر بعلامة صح." : "تم استكمال البنود المطلوبة. يمكنك الحفظ الآن."}</span>
+            <ul>{validationErrors.map((error, index) => {
+              const resolved = isValidationErrorResolved(error);
+              return <li key={`${validationErrorKey(error)}-${index}`} className={resolved ? "resolved" : ""}>{resolved ? "✓" : "•"} {error.message}</li>;
+            })}</ul>
           </div>
         )}
         <div className="form-grid">
           <Field label="رقم الطلب الداخلي"><input className="generated-id" dir="ltr" value={displayOrderNo(draft.orderNo)} readOnly title="رقم تلقائي لا يتكرر" /></Field>
-          <Field label="التاريخ" fieldKey="date" invalid={validationKeys.has("order:date")}><input type="date" dir="ltr" value={draft.date} aria-invalid={validationKeys.has("order:date")} onChange={(e) => {
-            patch({ date: e.target.value });
-            if (e.target.value) setValidationErrors((current) => current.filter((error) => error.field !== "date"));
-          }} /></Field>
+          <Field label="التاريخ" fieldKey="date" invalid={validationKeys.has("order:date")}><input type="date" dir="ltr" value={draft.date} aria-invalid={validationKeys.has("order:date")} onChange={(e) => patch({ date: e.target.value })} /></Field>
           <Field label="حالة الطلب">
             <select value={normalizeOrderStatus(draft.status)} onChange={(e) => patch({ status: e.target.value })}>
               {ORDER_STATUS_DEFS.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}
@@ -8651,6 +8724,7 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
   const [drag, setDrag] = useState(null);
   const [selectedPanelId, setSelectedPanelId] = useState("");
   const [selectedShapeId, setSelectedShapeId] = useState(null);
+  const [selectedOutlinePointId, setSelectedOutlinePointId] = useState(null);
   const stageRef = useRef(null);
   const svgRef = useRef(null);
   const drawing = normalizeDrawing(row.drawing);
@@ -8663,6 +8737,9 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
   const activeOutlinePoints = visualOutlinePointsForDrawing(activeDrawing, activeGeometry);
   const activeBounds = boundsFromOutline(activeOutlinePoints, activeGeometry);
   const selectedShape = activeDrawing.shapes.find((shape) => shape.id === selectedShapeId) || null;
+  const selectedOutlinePointIndex = activeOutlinePoints.findIndex((point) => point.id === selectedOutlinePointId);
+  const selectedOutlinePoint = selectedOutlinePointIndex >= 0 ? activeOutlinePoints[selectedOutlinePointIndex] : null;
+  const canDeleteSelectedOutlinePoint = !!selectedOutlinePoint && !selectedOutlinePoint.corner && activeOutlinePoints.length > 4;
   const pad = 520;
   const bounds = { x: 0, y: 0, right: workArea.width, bottom: workArea.height };
   const fullView = {
@@ -8682,6 +8759,10 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
   useEffect(() => {
     if (selectedShapeId && !activeDrawing.shapes.some((shape) => shape.id === selectedShapeId)) setSelectedShapeId(null);
   }, [activeDrawing.shapes, selectedShapeId]);
+
+  useEffect(() => {
+    if (selectedOutlinePointId && !activeOutlinePoints.some((point) => point.id === selectedOutlinePointId)) setSelectedOutlinePointId(null);
+  }, [activeOutlinePoints, selectedOutlinePointId]);
 
   useEffect(() => {
     setView((current) => {
@@ -8721,10 +8802,12 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
       if (event.key === "Delete" || event.key === "Backspace") {
         preventCancelableDefault(event);
         if (selectedShape) deleteSelectedShape();
+        else if (canDeleteSelectedOutlinePoint) deleteSelectedPanelOutlinePoint();
         else if (selectedPanel) deleteSelectedPanel();
       } else if (event.key === "Escape") {
         preventCancelableDefault(event);
         setSelectedShapeId(null);
+        setSelectedOutlinePointId(null);
         setTool("select");
       } else if (selectedShape && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
         preventCancelableDefault(event);
@@ -8747,7 +8830,7 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
     }
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [selectedShape, selectedPanel, panels.length]);
+  }, [selectedShape, selectedPanel, selectedOutlinePointId, canDeleteSelectedOutlinePoint, panels.length]);
 
   useEffect(() => {
     const node = stageRef.current;
@@ -8903,6 +8986,154 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
     };
   }
 
+  function outlinePointForPanel(panel, event) {
+    const point = svgPointFromEvent(event);
+    const width = numberValue(panel.width);
+    const height = numberValue(panel.height);
+    return {
+      x: Math.max(-320, Math.min(width + 320, point.x - numberValue(panel.x))),
+      y: Math.max(-320, Math.min(height + 320, point.y - numberValue(panel.y)))
+    };
+  }
+
+  function panelOutlinePoints(panel) {
+    const panelDrawing = normalizePanelDrawingData(panel?.drawing);
+    const geometry = { x: 0, y: 0, width: numberValue(panel?.width), height: numberValue(panel?.height) };
+    return outlinePointsForGeometry(panelDrawing, geometry).map((point, index) => normalizeOutlinePoint(point, index));
+  }
+
+  function commitPanelOutlinePoints(panelId, points) {
+    const panel = panels.find((item) => item.id === panelId);
+    if (!panel) return;
+    const panelDrawing = normalizePanelDrawingData(panel.drawing);
+    updatePanelDrawing(panelId, {
+      ...panelDrawing,
+      outline: { points: points.map((point, index) => normalizeOutlinePoint(point, index)) }
+    });
+  }
+
+  function addPanelPartialArch(panel, event, segmentIndex) {
+    preventCancelableDefault(event);
+    event.stopPropagation();
+    if (tool !== "partialArch") return;
+    const sourcePoints = panelOutlinePoints(panel);
+    if (sourcePoints.length < 2) return;
+    const safeIndex = ((Number(segmentIndex) % sourcePoints.length) + sourcePoints.length) % sourcePoints.length;
+    const rotatedPoints = [...sourcePoints.slice(safeIndex), ...sourcePoints.slice(0, safeIndex)];
+    const start = rotatedPoints[0];
+    const end = rotatedPoints[1];
+    if (!start || !end) return;
+    const clickPoint = outlinePointForPanel(panel, event);
+    const sx = numberValue(start.x);
+    const sy = numberValue(start.y);
+    const ex = numberValue(end.x);
+    const ey = numberValue(end.y);
+    const dx = ex - sx;
+    const dy = ey - sy;
+    const lengthSquared = Math.max(1, dx * dx + dy * dy);
+    const splitRatio = Math.max(0.12, Math.min(0.82, ((numberValue(clickPoint.x) - sx) * dx + (numberValue(clickPoint.y) - sy) * dy) / lengthSquared));
+    const split = {
+      id: uid(),
+      x: Math.round(sx + dx * splitRatio),
+      y: Math.round(sy + dy * splitRatio),
+      corner: false,
+      mode: "free",
+      halfDiameter: 0,
+      curve: false
+    };
+    const archStartX = numberValue(split.x);
+    const archStartY = numberValue(split.y);
+    const archDx = ex - archStartX;
+    const archDy = ey - archStartY;
+    const archLength = Math.max(1, Math.hypot(archDx, archDy));
+    const normal = { x: -archDy / archLength, y: archDx / archLength };
+    const midpoint = { x: (archStartX + ex) / 2, y: (archStartY + ey) / 2 };
+    const center = { x: numberValue(panel.width) / 2, y: numberValue(panel.height) / 2 };
+    const depth = Math.max(24, Math.min(160, archLength * 0.22));
+    const candidateA = { x: midpoint.x + normal.x * depth, y: midpoint.y + normal.y * depth };
+    const candidateB = { x: midpoint.x - normal.x * depth, y: midpoint.y - normal.y * depth };
+    const distanceA = Math.hypot(candidateA.x - center.x, candidateA.y - center.y);
+    const distanceB = Math.hypot(candidateB.x - center.x, candidateB.y - center.y);
+    const peak = distanceA >= distanceB ? candidateA : candidateB;
+    const control = {
+      id: uid(),
+      x: Math.round(Math.max(-320, Math.min(numberValue(panel.width) + 320, peak.x))),
+      y: Math.round(Math.max(-320, Math.min(numberValue(panel.height) + 320, peak.y))),
+      corner: false,
+      mode: "curve",
+      halfDiameter: Math.round(depth),
+      curve: true
+    };
+    const next = [rotatedPoints[0], split, control, ...rotatedPoints.slice(1)];
+    commitPanelOutlinePoints(panel.id, next);
+    setSelectedPanelId(panel.id);
+    setSelectedShapeId(null);
+    setSelectedOutlinePointId(split.id);
+    setTool("edge");
+  }
+
+  function addPanelOutlinePoint(panel, event, segmentIndex) {
+    preventCancelableDefault(event);
+    event.stopPropagation();
+    if (tool !== "edge") return;
+    const point = outlinePointForPanel(panel, event);
+    const next = panelOutlinePoints(panel);
+    const pointIndex = segmentIndex + 1;
+    next.splice(pointIndex, 0, {
+      id: uid(),
+      x: Math.round(point.x),
+      y: Math.round(point.y),
+      corner: false,
+      mode: "free",
+      halfDiameter: 0,
+      curve: false
+    });
+    commitPanelOutlinePoints(panel.id, next);
+    setSelectedPanelId(panel.id);
+    setSelectedShapeId(null);
+    setSelectedOutlinePointId(next[pointIndex].id);
+    event.currentTarget?.setPointerCapture?.(event.pointerId);
+    setDrag({ kind: "panelOutlinePoint", pointerId: event.pointerId, pointerTarget: event.currentTarget, panelId: panel.id, pointIndex });
+  }
+
+  function handlePanelOutlineSegmentPointerDown(panel, event, segmentIndex) {
+    if (tool === "partialArch") {
+      addPanelPartialArch(panel, event, segmentIndex);
+      return;
+    }
+    addPanelOutlinePoint(panel, event, segmentIndex);
+  }
+
+  function startPanelOutlinePointDrag(panel, event, point, pointIndex) {
+    preventCancelableDefault(event);
+    event.stopPropagation();
+    focusDrawingWorkspace();
+    setSelectedPanelId(panel.id);
+    setSelectedShapeId(null);
+    setSelectedOutlinePointId(point.id);
+    if (point.corner) return;
+    event.currentTarget?.setPointerCapture?.(event.pointerId);
+    setDrag({ kind: "panelOutlinePoint", pointerId: event.pointerId, pointerTarget: event.currentTarget, panelId: panel.id, pointIndex });
+  }
+
+  function panelSegmentHitPoints(segment, width = 46) {
+    const x1 = numberValue(segment.start.x);
+    const y1 = numberValue(segment.start.y);
+    const x2 = numberValue(segment.end.x);
+    const y2 = numberValue(segment.end.y);
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const length = Math.max(1, Math.hypot(dx, dy));
+    const nx = (-dy / length) * (width / 2);
+    const ny = (dx / length) * (width / 2);
+    return [
+      `${x1 + nx},${y1 + ny}`,
+      `${x2 + nx},${y2 + ny}`,
+      `${x2 - nx},${y2 - ny}`,
+      `${x1 - nx},${y1 - ny}`
+    ].join(" ");
+  }
+
   function addShapeToPanel(panel, event) {
     const point = localPointForPanel(panel, event);
     const currentDrawing = normalizePanelDrawingData(panel.drawing);
@@ -8922,6 +9153,7 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
     updatePanelDrawing(panel.id, { ...currentDrawing, shapes: [...currentDrawing.shapes, shape] });
     setSelectedPanelId(panel.id);
     setSelectedShapeId(shape.id);
+    setSelectedOutlinePointId(null);
   }
 
   function startPan(event) {
@@ -8943,6 +9175,8 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
     focusDrawingWorkspace();
     setSelectedPanelId(panel.id);
     setSelectedShapeId(null);
+    setSelectedOutlinePointId(null);
+    if (tool === "edge" || tool === "partialArch") return;
     if (tool !== "select") {
       addShapeToPanel(panel, event);
       return;
@@ -8962,6 +9196,7 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
     focusDrawingWorkspace();
     setSelectedPanelId(panel.id);
     setSelectedShapeId(shape.id);
+    setSelectedOutlinePointId(null);
     event.currentTarget?.setPointerCapture?.(event.pointerId);
     setDrag({ kind: "shape", pointerId: event.pointerId, pointerTarget: event.currentTarget, panelId: panel.id, shapeId: shape.id, startPoint: svgPointFromEvent(event), startShape: { ...shape } });
   }
@@ -9007,6 +9242,22 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
         return shape;
       });
       updatePanelDrawing(panel.id, { ...panelDrawing, shapes });
+      return;
+    }
+    if (drag.kind === "panelOutlinePoint") {
+      const panel = panels.find((item) => item.id === drag.panelId);
+      if (!panel) return;
+      const point = outlinePointForPanel(panel, event);
+      const points = panelOutlinePoints(panel);
+      if (!points[drag.pointIndex] || points[drag.pointIndex].corner) return;
+      const next = points.map((outlinePoint, pointIndex) => pointIndex === drag.pointIndex
+        ? {
+            ...outlinePoint,
+            x: Math.round(point.x),
+            y: Math.round(point.y)
+          }
+        : outlinePoint);
+      commitPanelOutlinePoints(panel.id, next);
     }
   }
 
@@ -9073,6 +9324,12 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
     setSelectedShapeId(null);
   }
 
+  function deleteSelectedPanelOutlinePoint() {
+    if (!selectedPanel || !canDeleteSelectedOutlinePoint) return;
+    commitPanelOutlinePoints(selectedPanel.id, activeOutlinePoints.filter((point) => point.id !== selectedOutlinePointId));
+    setSelectedOutlinePointId(null);
+  }
+
   function renderPanel(panel, panelIndex) {
     const panelDrawing = normalizePanelDrawingData(panel.drawing);
     const geometry = { x: 0, y: 0, width: numberValue(panel.width), height: numberValue(panel.height) };
@@ -9091,6 +9348,44 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
           <text x={numberValue(panel.width) / 2} y="-42" textAnchor="middle">{`${Math.round(numberValue(panel.width))}مم`}</text>
           <text x={numberValue(panel.width) + 44} y={numberValue(panel.height) / 2} textAnchor="middle" transform={`rotate(90 ${numberValue(panel.width) + 44} ${numberValue(panel.height) / 2})`}>{`${Math.round(numberValue(panel.height))}مم`}</text>
         </g>
+        {isSelected && (tool === "edge" || tool === "partialArch") && (
+          <g className="outline-edit-guides">
+            <path className="outline-active-path" d={outlinePath(outlinePoints)} />
+            {outlinePoints.map((point, pointIndex) => {
+              if (outlinePointMode(point) === "free" || pointIndex <= 0 || pointIndex >= outlinePoints.length - 1) return null;
+              const previous = outlinePoints[pointIndex - 1];
+              const next = outlinePoints[pointIndex + 1];
+              return (
+                <g className={outlinePointMode(point) === "arc" ? "outline-curve-guides arc" : "outline-curve-guides"} key={`panel-curve-${panel.id}-${point.id}`}>
+                  <line x1={previous.x} y1={previous.y} x2={point.x} y2={point.y} />
+                  <line x1={point.x} y1={point.y} x2={next.x} y2={next.y} />
+                </g>
+              );
+            })}
+            {outlineSegments(outlinePoints).map((segment) => {
+              const midX = (numberValue(segment.start.x) + numberValue(segment.end.x)) / 2;
+              const midY = (numberValue(segment.start.y) + numberValue(segment.end.y)) / 2;
+              return (
+                <g key={`panel-segment-${panel.id}-${segment.index}`}>
+                  <polygon className="outline-segment-hit" points={panelSegmentHitPoints(segment)} onPointerDown={(event) => handlePanelOutlineSegmentPointerDown(panel, event, segment.index)} />
+                  {!segment.start.corner && !segment.end.corner && <circle className="outline-segment-handle" cx={midX} cy={midY} r="12" />}
+                </g>
+              );
+            })}
+            {outlinePoints.map((point, pointIndex) => (
+              <circle
+                key={`panel-outline-point-${panel.id}-${point.id}`}
+                className={`outline-control-point${point.corner ? " corner" : ""}${outlinePointMode(point) === "curve" ? " curve" : ""}${outlinePointMode(point) === "arc" ? " arc" : ""}${point.id === selectedOutlinePointId ? " selected-outline-point" : ""}`}
+                cx={point.x}
+                cy={point.y}
+                r={point.corner ? 9 : 12}
+                onPointerDown={(event) => startPanelOutlinePointDrag(panel, event, point, pointIndex)}
+              >
+                <title>{point.corner ? "ركن ثابت" : `أفقي ${Math.round(numberValue(point.x))}مم / رأسي ${Math.round(numberValue(point.y))}مم`}</title>
+              </circle>
+            ))}
+          </g>
+        )}
         {panelDrawing.shapes.map((shape) => {
           const isShapeSelected = isSelected && selectedShapeId === shape.id;
           const ref = measurementReference(shape, outlineBounds, outlinePoints);
@@ -9145,9 +9440,19 @@ function MultiPanelDrawingEditor({ row, updateRow }) {
             ["rect", "مستطيل", RectangleHorizontal],
             ["cornerNotch", "ركنة", RectangleHorizontal],
             ["text", "نص", Pencil],
-            ["arrow", "أبعاد", Maximize2]
+            ["arrow", "أبعاد", Maximize2],
+            ["edge", "نقاط", Sparkles],
+            ["partialArch", "قوس جزئي", Sparkles]
           ].map(([value, label, Icon]) => <button key={value} type="button" title={label} className={tool === value ? "active" : ""} onClick={() => setTool(value)}><Icon size={16} />{label}</button>)}
-          <button type="button" className="danger" title="حذف العنصر المحدد" disabled={!selectedShape} onClick={deleteSelectedShape}><Trash2 size={16} />عنصر</button>
+          <button
+            type="button"
+            className="danger"
+            title="حذف العنصر المحدد"
+            disabled={!selectedShape && !canDeleteSelectedOutlinePoint}
+            onClick={() => selectedShape ? deleteSelectedShape() : deleteSelectedPanelOutlinePoint()}
+          >
+            <Trash2 size={16} />عنصر
+          </button>
         </div>
         <div className="outline-controls">
           <span className="drawing-size-chip"><Maximize2 size={14} />العرض <strong dir="ltr">{formatPanelNumber(workArea.width)} مم</strong></span>
@@ -11238,6 +11543,8 @@ function PreviewModal({ preview, currentUser, logoSrc, onClose }) {
     ? orderExportFileBase(preview.order)
     : preview.type === "supplier"
       ? supplierStatementFileBase(preview.statement)
+      : preview.type === "orderStatus"
+        ? orderStatusReportFileBase(preview.report)
       : title;
   function handlePdfExport() {
     if (preview.type === "order") return exportOrderPdf(preview.order, currentUser, logoSrc);
@@ -12394,7 +12701,7 @@ function buildOrderStatusReport(orders, selectedSuppliers = [], options = {}) {
       notes: [order.notes, ...(order.rows || []).map((row) => row.notes)].filter(Boolean).join(" | "),
       ...(showCosts ? { cost: isOrderPayableForSupplier(order) ? totals.supplierCost : 0 } : {})
     };
-  }).sort((a, b) => a.supplier.localeCompare(b.supplier, "ar") || String(a.date).localeCompare(String(b.date)) || a.orderNo.localeCompare(b.orderNo));
+  }).sort((a, b) => a.supplier.localeCompare(b.supplier, "ar") || String(b.date).localeCompare(String(a.date)) || a.orderNo.localeCompare(b.orderNo, "en", { numeric: true }));
   const suppliers = Object.values(rows.reduce((groups, row) => {
     groups[row.supplier] ||= { supplier: row.supplier, rows: [], subtotal: { quantity: 0, receivedQuantity: 0, remainingQuantity: 0, area: 0, ...(showCosts ? { cost: 0 } : {}) } };
     groups[row.supplier].rows.push(row);
@@ -12421,7 +12728,7 @@ function ReportGlassBreakdown({ entries = [] }) {
     <div className="report-glass-breakdown">
       {entries.map((entry, index) => (
         <div key={`${entry.description}-${index}`}>
-          <strong>{entry.description}</strong>
+          <strong><ArabicMixedText value={entry.description} /></strong>
           <span>المطلوب {money(entry.orderedQuantity)} — المستلم {money(entry.previouslyReceivedQuantity)} — المتبقي {money(entry.remainingQuantity)}</span>
         </div>
       ))}
@@ -12771,8 +13078,13 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
     return () => window.clearInterval(timer);
   }, []);
 
-  function patchAppearance(patchValue) {
+  function patchAppearance(patchValue, options = {}) {
     setAppearance((current) => normalizeReportPalette({ ...current, ...patchValue }));
+    if (options.globalLogo && isAdmin && Object.prototype.hasOwnProperty.call(patchValue, "reportLogoDataUrl")) {
+      persistGlobalAppearancePatch({ reportLogoDataUrl: patchValue.reportLogoDataUrl || "" })
+        .then(() => setMessage(patchValue.reportLogoDataUrl ? "تم حفظ شعار التقارير لجميع المستخدمين." : "تم حذف شعار التقارير العام."))
+        .catch((error) => setMessage(`تعذر حفظ الشعار العام: ${safeErrorMessage(error)}`));
+    }
   }
 
   async function refreshUsers() {
@@ -13413,8 +13725,8 @@ function SettingsView({ refreshAll, localStatus, setLocalStatus, setMessage, cur
             logoSrc={reportLogoSrc}
             title="شعار التقارير"
             description="هذا الشعار يظهر في رأس تقارير PDF والطباعة."
-            onLogo={(reportLogoDataUrl) => patchAppearance({ reportLogoDataUrl })}
-            onReset={() => patchAppearance({ reportLogoDataUrl: "" })}
+            onLogo={(reportLogoDataUrl) => patchAppearance({ reportLogoDataUrl }, { globalLogo: true })}
+            onReset={() => patchAppearance({ reportLogoDataUrl: "" }, { globalLogo: true })}
           />
           <Field label="خط العناوين">
             <Combo value={appearance.headingFontFamily} options={FONT_OPTIONS} onChange={(headingFontFamily) => patchAppearance({ headingFontFamily })} />
@@ -14298,16 +14610,21 @@ function reportPrintCss() {
       font-size: 9px;
       line-height: 1.3;
     }
-    .order-status-report-row > span {
+    .order-status-report-row > span,
+    .order-status-report-row > .report-glass-breakdown {
       padding: 6px 4px;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
       word-break: normal;
       white-space: normal;
+      letter-spacing: 0;
+      border-inline-start: 1px solid var(--report-border);
+      border-bottom: 1px solid var(--report-border);
     }
     .order-status-report-row.head > span,
     .order-status-report-row .keep-line {
-      white-space: normal;
-      overflow-wrap: anywhere;
+      white-space: nowrap;
+      overflow-wrap: normal;
+      word-break: normal;
     }
     .report-order-number-cell {
       min-width: 0;
@@ -14332,7 +14649,9 @@ function reportPrintCss() {
     .report-glass-breakdown strong,
     .report-glass-breakdown span {
       min-width: 0;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
+      word-break: normal;
+      letter-spacing: 0;
     }
     .report-glass-breakdown span {
       color: var(--report-muted-text);
@@ -15091,6 +15410,24 @@ function supplierStatementFileBase(statementOrSupplier) {
       ? ` - ${statement.fromDate || "البداية"} إلى ${statement.toDate || "الآن"}`
       : "";
   return `كشف حساب مورد ${cleanName(supplier.name) || "مورد"}${suffix}`;
+}
+
+function orderStatusReportFileBase(report = {}) {
+  const suppliers = (report.suppliers || []).map((supplier) => cleanName(supplier.supplier)).filter(Boolean);
+  const selectedSuppliers = (report.selectedSuppliers || []).map(cleanName).filter(Boolean);
+  const sourceSuppliers = selectedSuppliers.length ? selectedSuppliers : suppliers;
+  const supplierPart = sourceSuppliers.length === 1
+    ? sourceSuppliers[0]
+    : sourceSuppliers.length > 1
+      ? `${sourceSuppliers.length} موردين`
+      : "كل الموردين";
+  const statuses = [...new Set((report.rows || []).map((row) => cleanName(row.statusText || statusLabel(row.status))).filter(Boolean))];
+  const statusPart = statuses.length === 1
+    ? statuses[0]
+    : statuses.length > 1
+      ? `${statuses.length} حالات`
+      : "كل الحالات";
+  return `تقرير حالة الطلبات - ${supplierPart} - ${statusPart}`;
 }
 
 function readJsonSetting(key, fallback) {
@@ -16251,7 +16588,7 @@ async function exportOrderStatusExcel(report, currentUser) {
       }
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(costRows), "Cost Summary");
     }
-    return await saveWorkbook(XLSX, wb, "OrdersStatus.xlsx", { reportType: "status" });
+    return await saveWorkbook(XLSX, wb, `${orderStatusReportFileBase(safeReport)}.xlsx`, { reportType: "status" });
   } catch (error) {
     showExportError(error);
     return null;
@@ -16283,7 +16620,7 @@ async function exportSupplierPdf(statement, currentUser, logoSrc) {
 async function exportOrderStatusPdf(report, currentUser, logoSrc, saveOptions = {}) {
   try {
     const safeReport = sanitizeOrderStatusReportCosts(report, currentUser);
-    return await renderReportPdf(<OrderStatusReport report={safeReport} currentUser={currentUser} logoSrc={logoSrc} />, "OrdersStatus.pdf", { reportType: "status", ...saveOptions });
+    return await renderReportPdf(<OrderStatusReport report={safeReport} currentUser={currentUser} logoSrc={logoSrc} />, `${orderStatusReportFileBase(safeReport)}.pdf`, { reportType: "status", ...saveOptions });
   } catch (error) {
     showExportError(error);
     return null;
@@ -16333,8 +16670,22 @@ function StatusVariantApp() {
 
   useEffect(() => {
     applyAppearanceSettings(appearance);
-    persistAppearanceSettings(appearance);
-  }, [appearance]);
+    persistAppearanceSettings(appearance, currentUser);
+  }, [appearance, currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser || !hasSupabaseConfig()) return undefined;
+    let cancelled = false;
+    loadGlobalAppearanceSettings()
+      .then((globalSettings) => {
+        if (cancelled) return;
+        setAppearance(mergeAppearanceSettings(globalSettings, readStoredJson(appearanceStorageKey(currentUser), readStoredJson(APPEARANCE_STORAGE_KEY, {}))));
+      })
+      .catch(() => null);
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.id]);
 
   useEffect(() => {
     document.title = `حالة الطلبات — ${FULL_APP_NAME}`;

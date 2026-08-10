@@ -196,3 +196,17 @@ test("save flow validates the raw draft before building a filtered persistence s
   assert.ok(persistenceIndex > snapshotIndex);
   assert.match(saveSource, /if \(!validation\.isValid\)[\s\S]*?return null/);
 });
+
+test("validation summary remains a checklist and resolved fields leave the active invalid set", () => {
+  const mainSource = readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+  const entryStart = mainSource.indexOf("function EntryView(");
+  const entryEnd = mainSource.indexOf("function GlassRowEditor(", entryStart);
+  const entrySource = mainSource.slice(entryStart, entryEnd);
+
+  assert.match(entrySource, /function isValidationErrorResolved\(error = \{\}\)/);
+  assert.match(entrySource, /const unresolvedValidationErrors = validationErrors\.filter\(\(error\) => !isValidationErrorResolved\(error\)\)/);
+  assert.match(entrySource, /const validationKeys = new Set\(unresolvedValidationErrors\.map\(validationErrorKey\)\)/);
+  assert.match(entrySource, /className=\{resolved \? "resolved" : ""\}/);
+  assert.match(entrySource, /resolved \? "✓" : "•"/);
+  assert.match(entrySource, /تم استكمال البنود المطلوبة\. يمكنك الحفظ الآن\./);
+});
