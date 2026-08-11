@@ -6702,6 +6702,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   const layerColumnTotal = layerColumnWidths.reduce((sum, width) => sum + width, 0);
   const effectiveEntryColumnWidths = entryColumnWidths.map((width, index) => index === layersColumnIndex ? layerColumnTotal : width);
   draftRef.current = draft;
+  const currentRows = () => (draftRef.current || draft).rows || [];
 
   useEffect(() => {
     setValidationErrors([]);
@@ -7248,10 +7249,10 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     }
   }
   function maxVisibleLayerCount() {
-    return Math.max(1, ...(draft.rows || []).map((row) => Math.max(1, row.layers?.length || 1)));
+    return Math.max(1, ...currentRows().map((row) => Math.max(1, row.layers?.length || 1)));
   }
   function columnExistsInRow(rowIndex, column = "") {
-    const row = draft.rows[rowIndex];
+    const row = currentRows()[rowIndex];
     if (!row || !column) return false;
     if (["mode", "quantity", "rowCode", "notes"].includes(column)) return true;
     if (column === "doubleGap") return row.glassMode === "double";
@@ -7264,8 +7265,9 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     return layerIndex >= 0 && layerIndex < Math.max(1, row.layers?.length || 1);
   }
   function getColumnOrder(rowIndex = null) {
+    const rows = currentRows();
     const maxLayers = Number.isInteger(rowIndex)
-      ? Math.max(1, draft.rows[rowIndex]?.layers?.length || 1)
+      ? Math.max(1, rows[rowIndex]?.layers?.length || 1)
       : maxVisibleLayerCount();
     const columns = ["mode"];
     for (let layerIndex = 0; layerIndex < maxLayers; layerIndex += 1) {
@@ -7314,14 +7316,15 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     return null;
   }
   function rowIdAt(rowIndex) {
-    return draft.rows[rowIndex]?.id || "";
+    return currentRows()[rowIndex]?.id || "";
   }
   function rowIndexForCell(cell = {}) {
+    const rows = currentRows();
     if (cell.rowId) {
-      const byId = draft.rows.findIndex((row) => row.id === cell.rowId);
+      const byId = rows.findIndex((row) => row.id === cell.rowId);
       if (byId >= 0) return byId;
     }
-    return Number.isInteger(cell.row) ? Math.max(0, Math.min(draft.rows.length - 1, cell.row)) : -1;
+    return Number.isInteger(cell.row) ? Math.max(0, Math.min(rows.length - 1, cell.row)) : -1;
   }
   function makeTableCell(rowIndex, column) {
     return { row: rowIndex, rowId: rowIdAt(rowIndex), column };
@@ -7390,9 +7393,10 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   function startEditingCell(cell, options = {}) {
     const rowIndex = rowIndexForCell(cell);
     if (rowIndex < 0 || !cell?.column) return;
+    const rows = currentRows();
     const nextCell = makeTableCell(rowIndex, cell.column);
     const hasInitialText = Object.prototype.hasOwnProperty.call(options, "initialText");
-    const initialText = hasInitialText ? String(options.initialText ?? "") : String(readRowCellValue(draft.rows[rowIndex], cell.column) ?? "");
+    const initialText = hasInitialText ? String(options.initialText ?? "") : String(readRowCellValue(rows[rowIndex], cell.column) ?? "");
     setSelectedRowIds([]);
     setActiveCell(nextCell);
     setSelectedRange({ anchor: nextCell, focus: nextCell });

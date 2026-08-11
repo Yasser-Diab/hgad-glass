@@ -29,6 +29,22 @@ test("smart-table inputs keep stable row identity and consume the complete input
   assert.doesNotMatch(entrySource, /editorDraftRef|directEditRef|setCellDomValue|Date\.now\(\).*key|Math\.random\(\).*key/);
 });
 
+test("notes editing resolves rows from the live draft before focusing the input", () => {
+  const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
+  const rowIdSource = sourceSection("function rowIdAt(", "function rowIndexForCell(");
+  const rowIndexSource = sourceSection("function rowIndexForCell(", "function makeTableCell(");
+  const startEditingSource = sourceSection("function startEditingCell(", "function selectedColumnDefinitionIndexes(");
+
+  assert.match(entrySource, /const currentRows = \(\) => \(draftRef\.current \|\| draft\)\.rows \|\| \[\]/);
+  assert.match(rowIdSource, /return currentRows\(\)\[rowIndex\]\?\.id \|\| ""/);
+  assert.match(rowIndexSource, /const rows = currentRows\(\)/);
+  assert.match(rowIndexSource, /rows\.findIndex\(\(row\) => row\.id === cell\.rowId\)/);
+  assert.match(startEditingSource, /const rows = currentRows\(\)/);
+  assert.match(startEditingSource, /readRowCellValue\(rows\[rowIndex\], cell\.column\)/);
+  assert.match(entrySource, /columns\.push\("extraDirection", "rowCode", "notes"\)/);
+  assert.match(entrySource, /\["mode", "quantity", "rowCode", "notes"\]\.includes\(column\)/);
+});
+
 test("normal typing, native caret keys, paste, and composition are not hijacked", () => {
   const keyHandler = sourceSection("function handleTableKeyDown(", "function handleTablePaste(");
   const pasteHandler = sourceSection("function handleTablePaste(", "function rejectInvalidOrder(");
