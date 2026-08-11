@@ -7397,22 +7397,25 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const nextCell = makeTableCell(rowIndex, cell.column);
     const hasInitialText = Object.prototype.hasOwnProperty.call(options, "initialText");
     const initialText = hasInitialText ? String(options.initialText ?? "") : String(readRowCellValue(rows[rowIndex], cell.column) ?? "");
-    setSelectedRowIds([]);
-    setActiveCell(nextCell);
-    setSelectedRange({ anchor: nextCell, focus: nextCell });
-    setEditingCell(nextCell);
+    flushSync(() => {
+      setSelectedRowIds([]);
+      setActiveCell(nextCell);
+      setSelectedRange({ anchor: nextCell, focus: nextCell });
+      setEditingCell(nextCell);
+    });
     if (hasInitialText) {
-      setCellValue(rowIndex, cell.column, initialText, {
-        forceHistory: true,
-        label: "تعديل خلية"
+      flushSync(() => {
+        setCellValue(rowIndex, cell.column, initialText, {
+          forceHistory: true,
+          label: "تعديل خلية"
+        });
       });
     }
-    window.requestAnimationFrame(() => {
-      focusEntryTableControl(rowIndex, cell.column, 0, {
-        exact: true,
-        select: false,
-        caretEnd: true
-      });
+    focusEntryTableControl(rowIndex, cell.column, 0, {
+      exact: true,
+      select: false,
+      caretEnd: true,
+      immediate: true
     });
   }
   function selectedColumnDefinitionIndexes(kind, fallbackIndex) {
@@ -7551,6 +7554,11 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   function handleCellPointerDown(rowIndex, column, event) {
     if (event.button !== 0) return;
     const nextCell = makeTableCell(rowIndex, column);
+    const eventTarget = event.target instanceof Element ? event.target : null;
+    if (eventTarget && isEditableDomTarget(eventTarget) && sameTableCell(editingCell, nextCell)) {
+      event.stopPropagation();
+      return;
+    }
     if (isDropdownCellColumn(column)) {
       event.stopPropagation();
       activateDropdownCell(rowIndex, column);
@@ -8459,10 +8467,10 @@ function FillDownCell({ column, onCopyDown, children, className = "" }) {
         onPointerDown={(event) => {
           preventCancelableDefault(event);
           event.stopPropagation();
+          onCopyDown?.(column);
         }}
         onClick={(event) => {
           event.stopPropagation();
-          onCopyDown?.(column);
         }}
       >
         <ArrowDownToLine size={12} />
@@ -14472,11 +14480,16 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
         type="button"
         className="combo-toggle"
         tabIndex={-1}
-        onMouseDown={(event) => preventCancelableDefault(event)}
-        onClick={() => {
+        onPointerDown={(event) => {
+          preventCancelableDefault(event);
+          event.stopPropagation();
           if (!editing) return;
+          window.clearTimeout(openTimerRef.current);
           setOpen((current) => !current);
-          inputRef.current?.focus?.();
+          window.requestAnimationFrame(() => inputRef.current?.focus?.());
+        }}
+        onClick={(event) => {
+          event.stopPropagation();
         }}
         aria-label="فتح القائمة"
       >
@@ -14484,7 +14497,19 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
       </button>
       {open && (
         <div className="combo-menu" role="listbox">
-          {visibleOptions.length === 0 && <button type="button" className="combo-option muted" onMouseDown={(event) => preventCancelableDefault(event)}>لا توجد قيم مطابقة</button>}
+          {visibleOptions.length === 0 && (
+            <button
+              type="button"
+              className="combo-option muted"
+              onPointerDown={(event) => {
+                preventCancelableDefault(event);
+                event.stopPropagation();
+              }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              لا توجد قيم مطابقة
+            </button>
+          )}
           {visibleOptions.map((option, optionIndex) => (
             <button
               key={option}
@@ -14492,8 +14517,12 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
               ref={(node) => { optionRefs.current[optionIndex] = node; }}
               className={optionIndex === activeIndex ? "combo-option active" : "combo-option"}
               onMouseEnter={() => setActiveIndex(optionIndex)}
-              onMouseDown={(event) => preventCancelableDefault(event)}
-              onClick={() => commit(option, { moveAfterCommit: false })}
+              onPointerDown={(event) => {
+                preventCancelableDefault(event);
+                event.stopPropagation();
+                commit(option, { moveAfterCommit: false });
+              }}
+              onClick={(event) => event.stopPropagation()}
             >
               {option}
             </button>
@@ -16317,6 +16346,7 @@ function restoreRendererInputFocus(options = {}) {
   const preferredSelector = options.preferredSelector || "";
   const shouldSelect = options.select === true;
   const shouldPlaceCaretAtEnd = !!options.caretEnd;
+  const immediate = options.immediate === true;
   const suppressAutocomplete = options.suppressAutocomplete !== false;
   logFocusDiagnostics("restore-start");
   cleanupRendererInteractionState();
@@ -16368,7 +16398,8 @@ function restoreRendererInputFocus(options = {}) {
     logFocusDiagnostics("restore-end");
   }
 
-  window.setTimeout(() => focusAttempt(0), 35);
+  if (immediate) focusAttempt(0);
+  else window.setTimeout(() => focusAttempt(0), 35);
   if (desktopFocusResult && typeof desktopFocusResult.then === "function") {
     Promise.resolve(desktopFocusResult)
       .catch(() => null)

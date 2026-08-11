@@ -34,6 +34,7 @@ test("notes editing resolves rows from the live draft before focusing the input"
   const rowIdSource = sourceSection("function rowIdAt(", "function rowIndexForCell(");
   const rowIndexSource = sourceSection("function rowIndexForCell(", "function makeTableCell(");
   const startEditingSource = sourceSection("function startEditingCell(", "function selectedColumnDefinitionIndexes(");
+  const focusRestoreSource = sourceSection("function restoreRendererInputFocus(", "function logFocusDiagnostics(");
 
   assert.match(entrySource, /const currentRows = \(\) => \(draftRef\.current \|\| draft\)\.rows \|\| \[\]/);
   assert.match(rowIdSource, /return currentRows\(\)\[rowIndex\]\?\.id \|\| ""/);
@@ -41,6 +42,12 @@ test("notes editing resolves rows from the live draft before focusing the input"
   assert.match(rowIndexSource, /rows\.findIndex\(\(row\) => row\.id === cell\.rowId\)/);
   assert.match(startEditingSource, /const rows = currentRows\(\)/);
   assert.match(startEditingSource, /readRowCellValue\(rows\[rowIndex\], cell\.column\)/);
+  assert.match(startEditingSource, /flushSync\(\(\) => \{[\s\S]*setEditingCell\(nextCell\)/);
+  assert.match(startEditingSource, /flushSync\(\(\) => \{[\s\S]*setCellValue\(rowIndex, cell\.column, initialText/);
+  assert.doesNotMatch(startEditingSource, /requestAnimationFrame\(\(\) => \{[\s\S]*focusEntryTableControl/);
+  assert.match(startEditingSource, /immediate:\s*true/);
+  assert.match(focusRestoreSource, /const immediate = options\.immediate === true/);
+  assert.match(focusRestoreSource, /if \(immediate\) focusAttempt\(0\);\s*else window\.setTimeout\(\(\) => focusAttempt\(0\), 35\)/);
   assert.match(entrySource, /columns\.push\("extraDirection", "rowCode", "notes"\)/);
   assert.match(entrySource, /\["mode", "quantity", "rowCode", "notes"\]\.includes\(column\)/);
 });
@@ -69,6 +76,7 @@ test("selected cells start editing only from explicit edit actions", () => {
 
   assert.match(rowEditorSource, /onDoubleClick: \(event\) => onCellDoubleClick\(index, column, event\)/);
   assert.match(entrySource, /onCellDoubleClick=\{handleCellDoubleClick\}/);
+  assert.match(pointerHandler, /isEditableDomTarget\(eventTarget\) && sameTableCell\(editingCell, nextCell\)/);
   assert.match(pointerHandler, /setEditingCell\(null\)/);
   assert.doesNotMatch(pointerHandler, /setEditingCell\(nextCell\)/);
   assert.match(pointerHandler, /beginRangeDrag\(rowIndex, column, event\)/);
@@ -77,6 +85,7 @@ test("selected cells start editing only from explicit edit actions", () => {
 
 test("only fixed-choice table dropdown cells open from one click and Space", () => {
   const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
+  const fillDownSource = sourceSection("function FillDownCell(", "function formatPanelNumber(");
   const pointerHandler = sourceSection("function handleCellPointerDown(", "function handleCellDoubleClick(");
   const doubleClickHandler = sourceSection("function handleCellDoubleClick(", "function columnForRowNear(");
   const keyHandler = sourceSection("function handleTableKeyDown(", "function handleTablePaste(");
@@ -98,7 +107,10 @@ test("only fixed-choice table dropdown cells open from one click and Space", () 
   assert.match(keyHandler, /activateDropdownCell\(rowIndex, column\)/);
   assert.match(comboSource, /node\.addEventListener\("glass-orders-open-combo", forceOpenCombo\)/);
   assert.match(comboSource, /onBlur=\{\(event\) => \{[\s\S]*setOpen\(false\)/);
-  assert.match(comboSource, /if \(!editing\) return;[\s\S]*setOpen\(\(current\) => !current\)/);
+  assert.match(comboSource, /onPointerDown=\{\(event\) => \{[\s\S]*event\.stopPropagation\(\);[\s\S]*setOpen\(\(current\) => !current\)/);
+  assert.match(comboSource, /className=\{optionIndex === activeIndex \? "combo-option active" : "combo-option"\}[\s\S]*onPointerDown=\{\(event\) => \{[\s\S]*commit\(option, \{ moveAfterCommit: false \}\)/);
+  assert.match(fillDownSource, /onPointerDown=\{\(event\) => \{[\s\S]*event\.stopPropagation\(\);[\s\S]*onCopyDown\?\.\(column\)/);
+  assert.doesNotMatch(fillDownSource, /onClick=\{\(event\) => \{[\s\S]*onCopyDown\?\.\(column\)/);
 });
 
 test("smart-table selected-but-not-editing cells use spreadsheet selection affordance", () => {
