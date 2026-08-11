@@ -137,3 +137,32 @@ test("appearance logo changes support admin global persistence and user local ov
   assert.match(settingsView, /globalLogo/);
   assert.match(settingsView, /persistGlobalAppearancePatch\(\{ reportLogoDataUrl/);
 });
+
+test("manufacturing ticket screen uses Arabic operator-facing labels and readable ticket text", () => {
+  const manufacturingView = sourceBetween("function ManufacturingView(", "function TicketSheet(");
+  const ticketHelpers = sourceBetween("function ticketDescriptionForSettings(", "function TicketCard(");
+  const noQrTicketDescriptionStyle = styleSource.slice(
+    styleSource.indexOf(".ticket-card.no-qr .ticket-description"),
+    styleSource.indexOf(".ticket-card.ticket-tiny .ticket-description")
+  );
+
+  assert.match(manufacturingView, /تذاكر التصنيع/);
+  assert.match(manufacturingView, /حفظ PDF/);
+  assert.match(manufacturingView, /طباعة/);
+  assert.match(manufacturingView, /بحث برقم الطلب أو العميل أو المورد أو الكود/);
+  assert.match(manufacturingView, /الطابعة الافتراضية/);
+  assert.match(manufacturingView, /عرض التيكت \(مم\)/);
+  assert.match(manufacturingView, /ارتفاع التيكت \(مم\)/);
+  assert.doesNotMatch(manufacturingView, /Manufacturing Tickets|Save as PDF|>Print<|Ticket width|Ticket height|Default printer|Search order|No matching saved orders/);
+
+  assert.match(appSource, /const TICKET_FIELD_DEFS = \[[\s\S]*بيان الزجاج[\s\S]*الشركة المصنعة[\s\S]*ترقيم البند/);
+  assert.match(ticketHelpers, /\["رقم الطلب"/);
+  assert.match(ticketHelpers, /\["العميل"/);
+  assert.match(ticketHelpers, /\["المورد"/);
+  assert.match(ticketHelpers, /\["المشروع"/);
+  assert.match(ticketHelpers, /\["التاريخ"/);
+  assert.match(ticketHelpers, /\["العدد"/);
+  assert.doesNotMatch(ticketHelpers, /\["Order"|\["Customer"|\["Supplier"|\["Project"|\["Date"|\["Qty"/);
+  assert.match(noQrTicketDescriptionStyle, /white-space:\s*normal/);
+  assert.doesNotMatch(noQrTicketDescriptionStyle, /white-space:\s*nowrap/);
+});

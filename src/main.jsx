@@ -204,17 +204,17 @@ const DEFAULT_TICKET_FIELDS = {
   rowCounter: true
 };
 const TICKET_FIELD_DEFS = [
-  { key: "qrCode", label: "QR code" },
-  { key: "orderNo", label: "Order number" },
-  { key: "customerName", label: "Customer name" },
-  { key: "supplierName", label: "Supplier name" },
-  { key: "projectName", label: "Project name" },
-  { key: "orderDate", label: "Order date" },
-  { key: "glassDescription", label: "Glass description" },
-  { key: "glassManufacturer", label: "Glass manufacturer" },
-  { key: "rowQuantity", label: "Row quantity" },
-  { key: "orderCounter", label: "Order counter" },
-  { key: "rowCounter", label: "Row counter" }
+  { key: "qrCode", label: "رمز QR" },
+  { key: "orderNo", label: "رقم الطلب" },
+  { key: "customerName", label: "اسم العميل" },
+  { key: "supplierName", label: "اسم المورد" },
+  { key: "projectName", label: "اسم المشروع" },
+  { key: "orderDate", label: "تاريخ الطلب" },
+  { key: "glassDescription", label: "بيان الزجاج" },
+  { key: "glassManufacturer", label: "الشركة المصنعة" },
+  { key: "rowQuantity", label: "عدد البند" },
+  { key: "orderCounter", label: "ترقيم الطلب" },
+  { key: "rowCounter", label: "ترقيم البند" }
 ];
 const DEFAULT_PUBLIC_BOT_SETTINGS = {
   enabled: false,
@@ -5297,7 +5297,7 @@ function App() {
     function handleSaveResult(event) {
       const { result, error } = event.detail || {};
       if (error) setMessage(`تعذر حفظ الملف: ${error}`);
-      else if (result?.ok && result.printDialog) setMessage("تم فتح نافذة الطباعة. اختر Save as PDF لحفظ التقرير كنص قابل للبحث.");
+      else if (result?.ok && result.printDialog) setMessage("تم فتح نافذة الطباعة. اختر حفظ PDF لحفظ التقرير كنص قابل للبحث.");
       else if (result?.ok && result.filePath) setMessage(`تم حفظ الملف: ${result.filePath}`);
       restoreRendererInputFocus();
     }
@@ -11386,15 +11386,15 @@ function ManufacturingView({ data, onNotify, onOpen, canEditOrder }) {
   return (
     <section className="panel manufacturing-panel">
       <div className="panel-head">
-        <div><h2><Factory size={18} /> Manufacturing Tickets</h2><p>اختر طلباً محفوظاً وجهز Tickets لكل قطعة زجاج فعلية.</p></div>
+        <div><h2><Factory size={18} /> تذاكر التصنيع</h2><p>اختر طلباً محفوظاً وجهز تذكرة واضحة لكل قطعة زجاج فعلية.</p></div>
         <div className="actions">
-          <button className="primary" type="button" onClick={printTickets} disabled={busy || !tickets.length}><Printer size={18} />Print</button>
-          <button type="button" onClick={savePdf} disabled={busy || !tickets.length}><FileDown size={18} />Save as PDF</button>
+          <button className="primary" type="button" onClick={printTickets} disabled={busy || !tickets.length}><Printer size={18} />طباعة</button>
+          <button type="button" onClick={savePdf} disabled={busy || !tickets.length}><FileDown size={18} />حفظ PDF</button>
         </div>
       </div>
       <div className="manufacturing-layout">
         <aside className="manufacturing-sidebar">
-          <SearchBox value={query} onChange={setQuery} placeholder="Search order, customer, supplier, code" />
+          <SearchBox value={query} onChange={setQuery} placeholder="بحث برقم الطلب أو العميل أو المورد أو الكود" />
           <div className="order-pick-list">
             {filteredOrders.map((order) => (
               <div key={order.id || order.orderNo} className={`order-pick-item ${selectedOrder && (selectedOrder.id === order.id || selectedOrder.orderNo === order.orderNo) ? "active" : ""}`}>
@@ -11417,24 +11417,24 @@ function ManufacturingView({ data, onNotify, onOpen, canEditOrder }) {
                 )}
               </div>
             ))}
-            {!filteredOrders.length && <p className="hint">No matching saved orders.</p>}
+            {!filteredOrders.length && <p className="hint">لا توجد طلبات محفوظة مطابقة.</p>}
           </div>
         </aside>
         <div className="manufacturing-main">
           <div className="ticket-settings-grid">
-            <Field label="Printer">
+            <Field label="الطابعة">
               <select value={settings.printerName} onChange={(event) => patchSettings({ printerName: event.target.value })}>
-                <option value="">Default printer</option>
+                <option value="">الطابعة الافتراضية</option>
                 {printers.map((printer) => <option key={printer.name} value={printer.name}>{printer.displayName || printer.name}</option>)}
               </select>
             </Field>
-            <Field label="Ticket width (mm)"><input dir="ltr" inputMode="decimal" value={settings.widthMm} onChange={(event) => patchSettings({ widthMm: event.target.value })} /></Field>
-            <Field label="Ticket height (mm)"><input dir="ltr" inputMode="decimal" value={settings.heightMm} onChange={(event) => patchSettings({ heightMm: event.target.value })} /></Field>
-            <div className="ticket-summary"><span>{tickets.length} Tickets</span>{selectedOrder && <strong dir="ltr">{displayOrderNo(selectedOrder.orderNo)}</strong>}</div>
+            <Field label="عرض التيكت (مم)"><input dir="ltr" inputMode="decimal" value={settings.widthMm} onChange={(event) => patchSettings({ widthMm: event.target.value })} /></Field>
+            <Field label="ارتفاع التيكت (مم)"><input dir="ltr" inputMode="decimal" value={settings.heightMm} onChange={(event) => patchSettings({ heightMm: event.target.value })} /></Field>
+            <div className="ticket-summary"><span>{tickets.length} تذكرة</span>{selectedOrder && <strong dir="ltr">{displayOrderNo(selectedOrder.orderNo)}</strong>}</div>
           </div>
-          <div className="ticket-field-picker" aria-label="Ticket fields">
-            <label className="ticket-field mandatory"><input type="checkbox" checked readOnly /> Piece code</label>
-            <label className="ticket-field mandatory"><input type="checkbox" checked readOnly /> Measurements</label>
+          <div className="ticket-field-picker" aria-label="حقول التيكت">
+            <label className="ticket-field mandatory"><input type="checkbox" checked readOnly /> كود القطعة</label>
+            <label className="ticket-field mandatory"><input type="checkbox" checked readOnly /> المقاس</label>
             {TICKET_FIELD_DEFS.map((field) => (
               <label key={field.key} className="ticket-field">
                 <input
@@ -11453,10 +11453,10 @@ function ManufacturingView({ data, onNotify, onOpen, canEditOrder }) {
           )}
           {selectedOrder && (
             <div className="selected-order-strip">
-              <span><b>Customer</b>{selectedOrder.customerName || "اسم العميل"}</span>
-              <span><b>Supplier</b>{selectedOrder.supplierName || "اسم المورد"}</span>
-              <span><b>Project</b>{selectedOrder.project || "اسم المشروع"}</span>
-              <span><b>Date</b><strong dir="ltr">{formatStatusDate(resolveOrderIssueDate(selectedOrder))}</strong></span>
+              <span><b>العميل</b>{selectedOrder.customerName || "اسم العميل"}</span>
+              <span><b>المورد</b>{selectedOrder.supplierName || "اسم المورد"}</span>
+              <span><b>المشروع</b>{selectedOrder.project || "اسم المشروع"}</span>
+              <span><b>التاريخ</b><strong dir="ltr">{formatStatusDate(resolveOrderIssueDate(selectedOrder))}</strong></span>
               {canEditOrder?.(selectedOrder) && (
                 <button
                   className="selected-order-edit"
@@ -11537,18 +11537,18 @@ function ticketDescriptionForSettings(ticket, visibleFields) {
 function ticketExtraItems(ticket, visibleFields) {
   const payload = ticket.qrPayload || {};
   return [
-    visibleFields.orderNo ? ["Order", payload.orderNo || displayOrderNo(ticket.order?.orderNo)] : null,
-    visibleFields.customerName ? ["Customer", payload.customer || ticket.order?.customerName || ""] : null,
-    visibleFields.supplierName ? ["Supplier", payload.supplier || ticket.order?.supplierName || ""] : null,
-    visibleFields.projectName ? ["Project", payload.project || ticket.order?.project || ""] : null,
-    visibleFields.orderDate ? ["Date", formatStatusDate(payload.documentIssueDate || resolveOrderIssueDate(ticket.order))] : null,
-    visibleFields.rowQuantity ? ["Qty", ticket.rowQuantity] : null
+    visibleFields.orderNo ? ["رقم الطلب", payload.orderNo || displayOrderNo(ticket.order?.orderNo)] : null,
+    visibleFields.customerName ? ["العميل", payload.customer || ticket.order?.customerName || ""] : null,
+    visibleFields.supplierName ? ["المورد", payload.supplier || ticket.order?.supplierName || ""] : null,
+    visibleFields.projectName ? ["المشروع", payload.project || ticket.order?.project || ""] : null,
+    visibleFields.orderDate ? ["التاريخ", formatStatusDate(payload.documentIssueDate || resolveOrderIssueDate(ticket.order))] : null,
+    visibleFields.rowQuantity ? ["العدد", ticket.rowQuantity] : null
   ].filter((item) => item && cleanName(item[1]));
 }
 
 function ticketExtraValueDir(label, value) {
   const text = String(value ?? "").trim();
-  if (["Order", "Date", "Qty"].includes(label)) return "ltr";
+  if (["رقم الطلب", "التاريخ", "العدد"].includes(label)) return "ltr";
   if (!text) return "ltr";
   return /[A-Za-z]/.test(text) || /^[\d\s\-_/.:×+()]+$/.test(text) ? "ltr" : "rtl";
 }
@@ -11575,7 +11575,7 @@ function TicketCard({ ticket, qrSrc, settings, visibleFields = ticketVisibleFiel
               const valueDir = ticketExtraValueDir(label, value);
               return (
                 <span className="ticket-extra-item" key={label}>
-                  <b className="ticket-extra-label" lang="en" dir="ltr">{label}</b>
+                  <b className="ticket-extra-label" lang="ar" dir="rtl">{label}</b>
                   <bdi className="ticket-extra-value" dir={valueDir} lang={valueDir === "ltr" ? "en" : "ar"}>{value}</bdi>
                 </span>
               );
@@ -15934,17 +15934,17 @@ function ticketHiddenEnabledFields(settings = {}) {
   const fields = normalizedTicketFields(settings);
   const visible = ticketVisibleFields(settings);
   const names = {
-    qrCode: "QR code",
-    orderNo: "Order number",
-    customerName: "Customer name",
-    supplierName: "Supplier name",
-    projectName: "Project name",
-    orderDate: "Order date",
-    glassDescription: "Glass description",
-    glassManufacturer: "Glass manufacturer",
-    rowQuantity: "Row quantity",
-    orderCounter: "Order counter",
-    rowCounter: "Row counter"
+    qrCode: "رمز QR",
+    orderNo: "رقم الطلب",
+    customerName: "اسم العميل",
+    supplierName: "اسم المورد",
+    projectName: "اسم المشروع",
+    orderDate: "تاريخ الطلب",
+    glassDescription: "بيان الزجاج",
+    glassManufacturer: "الشركة المصنعة",
+    rowQuantity: "عدد البند",
+    orderCounter: "ترقيم الطلب",
+    rowCounter: "ترقيم البند"
   };
   return Object.entries(names)
     .filter(([key]) => fields[key] && !visible[key])
@@ -16572,7 +16572,7 @@ function ticketCardPrintHtml(ticket, qrSrc, settings, visibleFields = ticketVisi
         ${visibleFields.measurements ? `<strong class="ticket-measurement">${measurementMmHtml(ticket.widthMm, ticket.heightMm)}</strong>` : ""}
         ${extras.length ? `<div class="ticket-extra">${extras.map(([label, value]) => {
           const valueDir = ticketExtraValueDir(label, value);
-          return `<span class="ticket-extra-item"><b class="ticket-extra-label" lang="en" dir="ltr">${escapeHtml(label)}</b><bdi class="ticket-extra-value" dir="${valueDir}" lang="${valueDir === "ltr" ? "en" : "ar"}">${escapeHtml(value)}</bdi></span>`;
+          return `<span class="ticket-extra-item"><b class="ticket-extra-label" lang="ar" dir="rtl">${escapeHtml(label)}</b><bdi class="ticket-extra-value" dir="${valueDir}" lang="${valueDir === "ltr" ? "en" : "ar"}">${escapeHtml(value)}</bdi></span>`;
         }).join("")}</div>` : ""}
       </div>
       ${hasCounters ? `<div class="ticket-counters">
