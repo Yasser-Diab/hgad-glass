@@ -3489,8 +3489,10 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   background: var(--report-alternate-row-background);
 }
 .report-row > span {
+  box-sizing: border-box;
   padding: 9px 10px;
-  border-inline-start: 1px solid var(--report-border);
+  border-inline-start: 0;
+  border-left: 1px solid var(--report-border);
   border-bottom: 1px solid var(--report-border);
   box-shadow: none;
   min-width: 0;
@@ -3559,8 +3561,8 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
 }
 .split-root-description {
   grid-column: 2;
-  display: grid;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
   align-items: stretch;
   justify-content: flex-start;
   text-align: right;
@@ -3570,11 +3572,12 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   overflow-wrap: normal;
   word-break: normal;
 }
-.split-root-description > bdi {
+.split-root-summary {
   display: block;
   width: 100%;
   padding: 7px 10px 6px;
-  border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent);
+  border-bottom: 0;
+  color: var(--report-text);
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -3598,6 +3601,15 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   padding: 5px 10px;
   white-space: normal;
   overflow-wrap: anywhere;
+  text-align: right;
+  direction: rtl;
+}
+.split-layer-phrase {
+  display: block;
+  width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 .split-layer-list-item:not(:last-child),
 .split-layer-value:not(.last) {

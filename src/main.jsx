@@ -2985,7 +2985,9 @@ function shouldSplitLayersInOrderReport(row = {}) {
 
 function orderReportLayerDescription(layer, layerIndex) {
   const names = ["الأولى", "الثانية", "الثالثة"];
-  return cleanName(`الطبقة ${names[layerIndex] || layerIndex + 1}: زجاج ${layerText(layer)}`);
+  const glassType = cleanName(layer.glassType);
+  const glassLabel = glassType && glassType.startsWith("زجاج") ? glassType : cleanName(`زجاج ${glassType}`);
+  return cleanName(`الطبقة ${names[layerIndex] || layerIndex + 1}: ${glassLabel} ${normalizeThicknessText(layer.thickness || "")} ${layer.secure ? "سيكوريت" : ""} ${cleanName(layer.company)}`);
 }
 
 function orderReportLineItems(row = {}, index = 0) {
@@ -11801,11 +11803,11 @@ function OrderReportLineGroup({ row, index }) {
     >
       <span className="keep-line split-root-cell split-root-number">{root.rowNumber}</span>
       <span className="report-description description-cell split-root-cell split-root-description" dir="rtl">
-        <bdi><ArabicMixedText value={root.description} /></bdi>
+        <bdi className="split-root-summary"><ArabicMixedText value={root.description} /></bdi>
         <span className="split-layer-list">
           {lines.map((line) => (
             <span className="split-layer-list-item" key={`${line.key}-description`}>
-              <ArabicMixedText value={line.layerDescription} />
+              <bdi className="split-layer-phrase" dir="rtl"><ArabicMixedText value={line.layerDescription} /></bdi>
             </span>
           ))}
         </span>
@@ -14759,8 +14761,10 @@ function reportPrintCss() {
     }
     .report-row > span {
       min-width: 0;
+      box-sizing: border-box;
       padding: 8px 9px;
-      border-inline-start: 1px solid var(--report-border);
+      border-inline-start: 0;
+      border-left: 1px solid var(--report-border);
       border-bottom: 1px solid var(--report-border);
       overflow-wrap: break-word;
       display: flex;
@@ -14810,8 +14814,8 @@ function reportPrintCss() {
     }
     .split-root-description {
       grid-column: 2;
-      display: grid;
-      grid-template-rows: auto 1fr;
+      display: flex;
+      flex-direction: column;
       align-items: stretch;
       justify-content: flex-start;
       text-align: right;
@@ -14821,11 +14825,12 @@ function reportPrintCss() {
       overflow-wrap: normal;
       word-break: normal;
     }
-    .split-root-description > bdi {
+    .split-root-summary {
       display: block;
       width: 100%;
       padding: 7px 10px 6px;
-      border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent);
+      border-bottom: 0;
+      color: var(--report-text);
       white-space: normal;
       overflow-wrap: anywhere;
     }
@@ -14849,6 +14854,15 @@ function reportPrintCss() {
       padding: 5px 10px;
       white-space: normal;
       overflow-wrap: anywhere;
+      text-align: right;
+      direction: rtl;
+    }
+    .split-layer-phrase {
+      display: block;
+      width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: normal;
     }
     .split-layer-list-item:not(:last-child),
     .split-layer-value:not(.last) {
@@ -15608,20 +15622,20 @@ function preparePdfClone(clonedDocument, clonedElement) {
     .pdf-export-root .split-root-description,
     .pdf-host .split-root-description {
       grid-column: 2 !important;
-      display: grid !important;
-      grid-template-rows: auto 1fr !important;
+      display: flex !important;
+      flex-direction: column !important;
       align-items: stretch !important;
       gap: 0 !important;
       padding: 0 !important;
       overflow-wrap: normal !important;
       word-break: normal !important;
     }
-    .pdf-export-root .split-root-description > bdi,
-    .pdf-host .split-root-description > bdi {
+    .pdf-export-root .split-root-summary,
+    .pdf-host .split-root-summary {
       display: block !important;
       width: 100% !important;
       padding: 7px 10px 6px !important;
-      border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent) !important;
+      border-bottom: 0 !important;
       white-space: normal !important;
       overflow-wrap: anywhere !important;
     }
@@ -15640,6 +15654,16 @@ function preparePdfClone(clonedDocument, clonedElement) {
       padding: 5px 10px !important;
       white-space: normal !important;
       overflow-wrap: anywhere !important;
+      text-align: right !important;
+      direction: rtl !important;
+    }
+    .pdf-export-root .split-layer-phrase,
+    .pdf-host .split-layer-phrase {
+      display: block !important;
+      width: 100% !important;
+      white-space: normal !important;
+      overflow-wrap: anywhere !important;
+      word-break: normal !important;
     }
     .pdf-export-root .split-layer-value:not(.last),
     .pdf-host .split-layer-value:not(.last) {
@@ -15653,7 +15677,9 @@ function preparePdfClone(clonedDocument, clonedElement) {
     }
     .pdf-export-root .report-row > span,
     .pdf-host .report-row > span {
-      border-inline-start: 1px solid var(--report-border) !important;
+      box-sizing: border-box !important;
+      border-inline-start: 0 !important;
+      border-left: 1px solid var(--report-border) !important;
       border-bottom: 1px solid var(--report-border) !important;
     }
     .pdf-export-root .split-root-cell,
