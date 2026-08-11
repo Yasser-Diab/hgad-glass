@@ -82,12 +82,15 @@ test("order report splits only unequal double or triplex layer measurements into
   assert.match(orderReport, /split-root-cell split-root-description/);
   assert.match(orderReport, /split-layer-list-item/);
   assert.match(drawingReport, /<OrderReportLineGroup row=\{row\} index=\{index\} \/>/);
+  assert.match(styleSource, /\.order-report-table \.order-report-row\s*\{[\s\S]*minmax\(0,\s*4\.2fr\)[\s\S]*minmax\(44px,\s*\.46fr\)/);
   assert.match(styleSource, /\.split-layer-report-group\s*\{[\s\S]*grid-template-rows:\s*repeat\(var\(--split-layer-count/);
   assert.match(styleSource, /\.split-root-cell\s*\{[\s\S]*grid-row:\s*1 \/ calc\(var\(--split-layer-count/);
   assert.match(styleSource, /\.split-root-cell\s*\{[\s\S]*border-bottom:\s*2px solid var\(--report-border\)/);
   assert.match(styleSource, /\.split-root-description\s*\{[\s\S]*display:\s*grid/);
+  assert.match(styleSource, /\.split-root-description\s*\{[\s\S]*word-break:\s*normal/);
   assert.match(styleSource, /\.split-root-description > bdi\s*\{[\s\S]*border-bottom:\s*1px solid color-mix/);
   assert.match(styleSource, /\.split-layer-list\s*\{[\s\S]*grid-template-rows:\s*repeat\(var\(--split-layer-count,\s*2\),\s*minmax\(36px,\s*1fr\)\)/);
+  assert.match(styleSource, /\.split-layer-list\s*\{[\s\S]*line-height:\s*1\.25/);
   assert.match(styleSource, /\.split-layer-list-item:not\(:last-child\),\s*\.split-layer-value:not\(\.last\)/);
   assert.match(styleSource, /\.split-layer-value\.last\s*\{[\s\S]*border-bottom-width:\s*2px/);
 });

@@ -5588,8 +5588,8 @@ function App() {
     return run;
   }
 
-  async function previewDraftOrder() {
-    const sourceDraft = draftRef.current || draft;
+  async function previewDraftOrder(draftOverride = null) {
+    const sourceDraft = draftOverride || draftRef.current || draft;
     const validation = validateOrderForReport(sourceDraft);
     if (!validation.ok) {
       setMessage(validation.message || "تعذر تجهيز المعاينة قبل استكمال البيانات المطلوبة.");
@@ -8075,11 +8075,13 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     return { ok: false, draft: currentDraft };
   }
   function ensureRowsValid() {
-    const validation = validateOrderRows(draft);
+    const currentDraft = draftRef.current || draft;
+    const validation = validateOrderRows(currentDraft);
     return validation.ok || rejectInvalidOrder(validation);
   }
   function ensureReportValid() {
-    const validation = validateOrderForReport(draft);
+    const currentDraft = draftRef.current || draft;
+    const validation = validateOrderForReport(currentDraft);
     if (validation.ok) return true;
     if (Number.isInteger(validation.rowIndex)) return rejectInvalidOrder(validation);
     notify?.(validation.message);
@@ -8104,7 +8106,8 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   async function handlePreview() {
     if (saving) return;
     await commitActiveEditorBeforeAction();
-    if (ensureReportValid()) onPreview();
+    const currentDraft = draftRef.current || draft;
+    if (ensureReportValid()) await Promise.resolve(onPreview(currentDraft));
   }
   async function handleExportPdf() {
     if (saving) return;
@@ -14748,13 +14751,13 @@ function reportPrintCss() {
     }
     .order-report-row {
       grid-template-columns:
-        minmax(42px, .5fr)
-        minmax(0, 2.7fr)
-        minmax(70px, .9fr)
-        minmax(58px, .72fr)
-        minmax(58px, .72fr)
-        minmax(44px, .5fr)
-        minmax(52px, .62fr);
+        minmax(40px, .42fr)
+        minmax(0, 4.2fr)
+        minmax(44px, .46fr)
+        minmax(62px, .64fr)
+        minmax(62px, .64fr)
+        minmax(46px, .46fr)
+        minmax(72px, .74fr);
     }
     .split-layer-report-group {
       grid-template-rows: repeat(var(--split-layer-count, 2), minmax(44px, auto));
@@ -14782,12 +14785,16 @@ function reportPrintCss() {
       gap: 0;
       padding: 0;
       line-height: 1.35;
+      overflow-wrap: normal;
+      word-break: normal;
     }
     .split-root-description > bdi {
       display: block;
       width: 100%;
-      padding: 8px 10px 6px;
+      padding: 7px 10px 6px;
       border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent);
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
     .split-root-code { grid-column: 3; }
     .split-layer-list {
@@ -14799,6 +14806,7 @@ function reportPrintCss() {
       color: #35506b;
       font-size: .82em;
       font-weight: 800;
+      line-height: 1.25;
     }
     .split-layer-list-item {
       display: flex;
@@ -14806,6 +14814,8 @@ function reportPrintCss() {
       justify-content: flex-start;
       min-height: 36px;
       padding: 5px 10px;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
     .split-layer-list-item:not(:last-child),
     .split-layer-value:not(.last) {
@@ -15539,13 +15549,13 @@ function preparePdfClone(clonedDocument, clonedElement) {
     .pdf-export-root .order-report-row,
     .pdf-host .order-report-row {
       grid-template-columns:
-        minmax(42px, .5fr)
-        minmax(0, 2.7fr)
-        minmax(70px, .9fr)
-        minmax(58px, .72fr)
-        minmax(58px, .72fr)
-        minmax(44px, .5fr)
-        minmax(52px, .62fr) !important;
+        minmax(40px, .42fr)
+        minmax(0, 4.2fr)
+        minmax(44px, .46fr)
+        minmax(62px, .64fr)
+        minmax(62px, .64fr)
+        minmax(46px, .46fr)
+        minmax(72px, .74fr) !important;
     }
     .pdf-export-root .split-layer-report-group,
     .pdf-host .split-layer-report-group {
@@ -15570,13 +15580,17 @@ function preparePdfClone(clonedDocument, clonedElement) {
       align-items: stretch !important;
       gap: 0 !important;
       padding: 0 !important;
+      overflow-wrap: normal !important;
+      word-break: normal !important;
     }
     .pdf-export-root .split-root-description > bdi,
     .pdf-host .split-root-description > bdi {
       display: block !important;
       width: 100% !important;
-      padding: 8px 10px 6px !important;
+      padding: 7px 10px 6px !important;
       border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent) !important;
+      white-space: normal !important;
+      overflow-wrap: anywhere !important;
     }
     .pdf-export-root .split-root-code,
     .pdf-host .split-root-code { grid-column: 3 !important; }
@@ -15585,11 +15599,14 @@ function preparePdfClone(clonedDocument, clonedElement) {
       grid-template-rows: repeat(var(--split-layer-count, 2), minmax(36px, 1fr)) !important;
       margin-top: 0 !important;
       border-top: 0 !important;
+      line-height: 1.25 !important;
     }
     .pdf-export-root .split-layer-list-item,
     .pdf-host .split-layer-list-item {
       min-height: 36px !important;
       padding: 5px 10px !important;
+      white-space: normal !important;
+      overflow-wrap: anywhere !important;
     }
     .pdf-export-root .split-layer-value:not(.last),
     .pdf-host .split-layer-value:not(.last) {

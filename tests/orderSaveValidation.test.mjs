@@ -199,10 +199,11 @@ test("save flow validates the raw draft before building a filtered persistence s
 
 test("order preview validates and renders the draft without saving first", () => {
   const mainSource = readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
-  const previewStart = mainSource.indexOf("async function previewDraftOrder()");
+  const previewStart = mainSource.indexOf("async function previewDraftOrder(draftOverride = null)");
   const previewEnd = mainSource.indexOf("async function exportDraftOrderPdf", previewStart);
   const previewSource = mainSource.slice(previewStart, previewEnd);
 
+  assert.match(previewSource, /const sourceDraft = draftOverride \|\| draftRef\.current \|\| draft/);
   assert.match(previewSource, /validateOrderForReport\(sourceDraft\)/);
   assert.match(previewSource, /setPreview\(\{ type: "order", order: previewOrder \}\)/);
   assert.doesNotMatch(previewSource, /saveDraft\(/);
@@ -216,6 +217,8 @@ test("validation summary remains a checklist and resolved fields leave the activ
   const entrySource = mainSource.slice(entryStart, entryEnd);
 
   assert.match(entrySource, /function isValidationErrorResolved\(error = \{\}\)/);
+  assert.match(entrySource, /function ensureReportValid\(\)[\s\S]*const currentDraft = draftRef\.current \|\| draft[\s\S]*validateOrderForReport\(currentDraft\)/);
+  assert.match(entrySource, /if \(ensureReportValid\(\)\) await Promise\.resolve\(onPreview\(currentDraft\)\)/);
   assert.match(entrySource, /const unresolvedValidationErrors = validationErrors\.filter\(\(error\) => !isValidationErrorResolved\(error\)\)/);
   assert.match(entrySource, /const validationKeys = new Set\(unresolvedValidationErrors\.map\(validationErrorKey\)\)/);
   assert.match(entrySource, /className=\{resolved \? "resolved" : ""\}/);

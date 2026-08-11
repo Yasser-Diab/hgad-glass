@@ -3530,16 +3530,16 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   color: var(--report-text);
   font-weight: 800;
 }
-.order-report-row { grid-template-columns: 52px minmax(240px, 2.1fr) minmax(142px, 1.15fr) 92px 92px 80px 92px; }
+.order-report-row { grid-template-columns: 44px minmax(320px, 3.3fr) minmax(54px, .48fr) minmax(70px, .68fr) minmax(70px, .68fr) minmax(52px, .48fr) minmax(76px, .74fr); }
 .order-report-table .order-report-row {
   grid-template-columns:
-    minmax(42px, .5fr)
-    minmax(0, 2.7fr)
-    minmax(70px, .9fr)
-    minmax(58px, .72fr)
-    minmax(58px, .72fr)
-    minmax(44px, .5fr)
-    minmax(52px, .62fr);
+    minmax(40px, .42fr)
+    minmax(0, 4.2fr)
+    minmax(44px, .46fr)
+    minmax(62px, .64fr)
+    minmax(62px, .64fr)
+    minmax(46px, .46fr)
+    minmax(72px, .74fr);
 }
 .split-layer-report-group {
   grid-template-rows: repeat(var(--split-layer-count, 2), minmax(44px, auto));
@@ -3567,12 +3567,16 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   gap: 0;
   padding: 0;
   line-height: 1.35;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 .split-root-description > bdi {
   display: block;
   width: 100%;
-  padding: 8px 10px 6px;
+  padding: 7px 10px 6px;
   border-bottom: 1px solid color-mix(in srgb, var(--report-border) 35%, transparent);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .split-root-code { grid-column: 3; }
 .split-layer-list {
@@ -3584,6 +3588,7 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   color: #35506b;
   font-size: .82em;
   font-weight: 800;
+  line-height: 1.25;
 }
 .split-layer-list-item {
   display: flex;
@@ -3591,6 +3596,8 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   justify-content: flex-start;
   min-height: 36px;
   padding: 5px 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .split-layer-list-item:not(:last-child),
 .split-layer-value:not(.last) {
