@@ -76,17 +76,22 @@ test("order report splits only unequal double or triplex layer measurements into
   assert.match(layerSplitHelpers, /layerAreaM2\(layer, pieceCount\)/);
   assert.match(layerSplitHelpers, /orderReportLayerDescription\(layer, layerIndex\)/);
   assert.match(orderReport, /function OrderReportLineGroup\(\{ row, index \}\)/);
+  assert.match(orderReport, /<span>NO\.<\/span><span className="code-header">الكود<\/span><span className="description-header">البيان<\/span>/);
   assert.match(orderReport, /className="report-row order-report-row split-layer-report-group"/);
   assert.match(orderReport, /"--split-layer-count": lines\.length/);
   assert.match(orderReport, /split-root-cell split-root-number/);
+  assert.match(orderReport, /code-cell split-root-cell split-root-code/);
   assert.match(orderReport, /split-root-cell split-root-description/);
   assert.match(orderReport, /split-layer-list-item/);
   assert.match(orderReport, /split-layer-phrase/);
   assert.match(drawingReport, /<OrderReportLineGroup row=\{row\} index=\{index\} \/>/);
-  assert.match(styleSource, /\.order-report-table \.order-report-row\s*\{[\s\S]*minmax\(0,\s*4\.2fr\)[\s\S]*minmax\(44px,\s*\.46fr\)/);
+  assert.match(styleSource, /\.order-report-table \.order-report-row\s*\{[\s\S]*minmax\(54px,\s*\.54fr\)[\s\S]*minmax\(0,\s*4\.2fr\)/);
   assert.match(styleSource, /\.split-layer-report-group\s*\{[\s\S]*grid-template-rows:\s*repeat\(var\(--split-layer-count/);
+  assert.match(styleSource, /--split-layer-separator:\s*color-mix\(in srgb,\s*var\(--report-border\) 36%,\s*transparent\)/);
   assert.match(styleSource, /\.split-root-cell\s*\{[\s\S]*grid-row:\s*1 \/ calc\(var\(--split-layer-count/);
-  assert.match(styleSource, /\.split-root-cell\s*\{[\s\S]*border-bottom:\s*2px solid var\(--report-border\)/);
+  assert.match(styleSource, /\.split-root-cell\s*\{[\s\S]*border-bottom:\s*1px solid var\(--report-border\)/);
+  assert.match(styleSource, /\.split-root-code\s*\{\s*grid-column:\s*2;\s*\}/);
+  assert.match(styleSource, /\.split-root-description\s*\{[\s\S]*grid-column:\s*3/);
   assert.match(styleSource, /\.split-root-description\s*\{[\s\S]*display:\s*flex/);
   assert.match(styleSource, /\.split-root-description\s*\{[\s\S]*word-break:\s*normal/);
   assert.match(styleSource, /\.split-root-summary\s*\{[\s\S]*border-bottom:\s*0/);
@@ -94,7 +99,9 @@ test("order report splits only unequal double or triplex layer measurements into
   assert.match(styleSource, /\.split-layer-list\s*\{[\s\S]*line-height:\s*1\.25/);
   assert.match(styleSource, /\.split-layer-phrase\s*\{[\s\S]*width:\s*100%/);
   assert.match(styleSource, /\.split-layer-list-item:not\(:last-child\),\s*\.split-layer-value:not\(\.last\)/);
-  assert.match(styleSource, /\.split-layer-value\.last\s*\{[\s\S]*border-bottom-width:\s*2px/);
+  assert.match(styleSource, /\.split-layer-value\.last\s*\{[\s\S]*border-bottom-width:\s*1px/);
+  assert.match(styleSource, /\.report-row\.split-layer-report-group > \.split-layer-value:not\(\.last\)\s*\{[\s\S]*border-bottom:\s*1px solid var\(--split-layer-separator\)/);
+  assert.match(styleSource, /\.report-row\.split-layer-report-group > \.split-layer-value\.last,\s*\.report-row\.split-layer-report-group > \.split-root-cell\s*\{[\s\S]*border-bottom:\s*1px solid var\(--report-border\)/);
   assert.match(styleSource, /\.report-row > span\s*\{[\s\S]*border-left:\s*1px solid var\(--report-border\)/);
 });
 
@@ -165,4 +172,19 @@ test("manufacturing ticket screen uses Arabic operator-facing labels and readabl
   assert.doesNotMatch(ticketHelpers, /\["Order"|\["Customer"|\["Supplier"|\["Project"|\["Date"|\["Qty"/);
   assert.match(noQrTicketDescriptionStyle, /white-space:\s*normal/);
   assert.doesNotMatch(noQrTicketDescriptionStyle, /white-space:\s*nowrap/);
+});
+
+test("manufacturing ticket order picker keeps a readable scrollable aside", () => {
+  assert.match(styleSource, /\.workspace > \.panel\.manufacturing-panel > \.panel-head\s*\{[\s\S]*position:\s*static/);
+  assert.match(styleSource, /\.manufacturing-layout\s*\{[\s\S]*grid-template-columns:\s*minmax\(0,\s*1fr\) minmax\(320px,\s*380px\)/);
+  assert.match(styleSource, /\.manufacturing-layout\s*\{[\s\S]*grid-template-areas:\s*"main sidebar"/);
+  assert.match(styleSource, /\.manufacturing-layout\s*\{[\s\S]*align-items:\s*stretch/);
+  assert.match(styleSource, /\.manufacturing-layout\s*\{[\s\S]*height:\s*clamp\(520px,\s*calc\(100dvh - 220px\),\s*760px\)/);
+  assert.match(styleSource, /\.manufacturing-sidebar\s*\{[\s\S]*grid-area:\s*sidebar[\s\S]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)/);
+  assert.match(styleSource, /\.manufacturing-main\s*\{[\s\S]*grid-area:\s*main[\s\S]*overflow:\s*auto/);
+  assert.match(styleSource, /\.order-pick-list\s*\{[\s\S]*align-content:\s*start[\s\S]*min-height:\s*0[\s\S]*max-height:\s*none[\s\S]*overflow:\s*auto/);
+  assert.match(styleSource, /\.order-pick-item\s*\{[\s\S]*min-height:\s*104px/);
+  assert.match(styleSource, /\.order-pick-list \.order-pick-select\s*\{[\s\S]*min-height:\s*104px/);
+  assert.match(styleSource, /@media \(max-width: 1050px\)\s*\{[\s\S]*grid-template-areas:\s*"sidebar"\s*"main"/);
+  assert.match(styleSource, /@media \(max-width: 1050px\)\s*\{[\s\S]*\.order-pick-list\s*\{[\s\S]*min-height:\s*300px[\s\S]*max-height:\s*45vh/);
 });

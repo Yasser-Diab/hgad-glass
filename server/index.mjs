@@ -446,8 +446,8 @@ async function migrate() {
     create table if not exists glass_orders (id text primary key, order_no text not null unique, document_id text, order_date text not null, entry_at text, status text not null default 'draft', entry_mode text not null default 'normal', collected_pieces real not null default 0, customer_id text, supplier_id text, customer_name text, supplier_name text, project text, code text, notes text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
     create table if not exists glass_order_rows (id text primary key, order_id text not null, line_no integer not null default 1, glass_mode text not null default 'single', code text, quantity real not null default 1, unit_price real not null default 0, supplier_unit_price real not null default 0, material_unit_price real not null default 0, supplier_material_unit_price real not null default 0, double_gap text, triplex_pvb text, extra_direction text, notes text, received_quantity real, receipt_history text not null default '[]', layers text not null, drawing text not null, area_m2 real not null default 0, cost real not null default 0, supplier_cost real not null default 0, created_at text not null default current_timestamp);
     create table if not exists learned_options (id text primary key, kind text not null, value text not null, unique(kind, value));
-    create table if not exists order_revisions (id text primary key, order_id text not null, revision_number integer not null, snapshot jsonb not null, changed_by text, change_type text not null, app_version text not null default '0.1.11', client_type text not null default 'local-server', created_at text not null default current_timestamp, unique(order_id, revision_number));
-    create table if not exists order_row_audit (id text primary key, order_id text not null, row_id text not null, action text not null, previous_value jsonb, new_value jsonb, changed_by text, app_version text not null default '0.1.11', client_type text not null default 'local-server', created_at text not null default current_timestamp);
+    create table if not exists order_revisions (id text primary key, order_id text not null, revision_number integer not null, snapshot jsonb not null, changed_by text, change_type text not null, app_version text not null default '0.1.12', client_type text not null default 'local-server', created_at text not null default current_timestamp, unique(order_id, revision_number));
+    create table if not exists order_row_audit (id text primary key, order_id text not null, row_id text not null, action text not null, previous_value jsonb, new_value jsonb, changed_by text, app_version text not null default '0.1.12', client_type text not null default 'local-server', created_at text not null default current_timestamp);
     create table if not exists order_item_recovery_staging (recovery_id text primary key, order_id text, order_number text, source_type text not null, source_reference text, line_number integer, recovered_payload jsonb not null, reviewed boolean not null default false, applied boolean not null default false, created_at text not null default current_timestamp);
     alter table glass_order_rows add column if not exists material_unit_price real not null default 0;
     alter table glass_order_rows add column if not exists supplier_material_unit_price real not null default 0;
@@ -480,7 +480,7 @@ async function captureLocalOrderRevision(orderId, changeType, changedBy = null) 
   const revisionNumber = Number(revisionResult.rows[0]?.next_revision || 1);
   await db.query(
     `insert into order_revisions (id, order_id, revision_number, snapshot, changed_by, change_type, app_version, client_type)
-     values ($1,$2,$3,$4::jsonb,$5,$6,'0.1.11','local-server')`,
+     values ($1,$2,$3,$4::jsonb,$5,$6,'0.1.12','local-server')`,
     [gid("rev"), orderId, revisionNumber, JSON.stringify({ order, rows: rowsResult.rows }), changedBy, changeType]
   );
   return revisionNumber;
@@ -490,7 +490,7 @@ async function auditLocalOrderRow(orderId, rowId, action, previousValue, newValu
   if (previousValue && newValue && JSON.stringify(previousValue) === JSON.stringify(newValue)) return;
   await db.query(
     `insert into order_row_audit (id, order_id, row_id, action, previous_value, new_value, changed_by, app_version, client_type)
-     values ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,'0.1.11','local-server')`,
+     values ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,'0.1.12','local-server')`,
     [
       gid("audit"),
       orderId,

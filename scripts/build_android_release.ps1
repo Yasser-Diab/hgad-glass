@@ -67,6 +67,22 @@ function Copy-Apk {
   Write-Host "APK: $destination"
 }
 
+function Invoke-DebugBuildFallback {
+  param([Parameter(Mandatory = $true)][string]$Reason)
+  Write-Warning "$Reason"
+  Write-Warning "Falling back to Android debug APK packaging. Production-signed Android release APKs will not be produced."
+  Push-Location $root
+  try {
+    & npm run android:debug
+    if ($LASTEXITCODE -ne 0) {
+      throw "Android debug fallback failed with exit code $LASTEXITCODE"
+    }
+  } finally {
+    Pop-Location
+  }
+  exit 0
+}
+
 if (!(Test-Path $androidDir)) {
   throw "Android project is missing. Run: npm run android:add"
 }
@@ -79,11 +95,11 @@ $signingVariables = @(
 )
 $missingSigningVariables = $signingVariables | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) }
 if ($missingSigningVariables.Count -gt 0) {
-  throw "Android release signing is not configured. Set these environment variables outside Git: $($missingSigningVariables -join ', ')"
+  Invoke-DebugBuildFallback "Android release signing is not configured. Set these environment variables outside Git: $($missingSigningVariables -join ', ')"
 }
 $releaseStorePath = [Environment]::GetEnvironmentVariable("YD_RELEASE_STORE_FILE")
 if (!(Test-Path -LiteralPath $releaseStorePath -PathType Leaf)) {
-  throw "Android release keystore was not found at the path in YD_RELEASE_STORE_FILE."
+  Invoke-DebugBuildFallback "Android release keystore was not found at the path in YD_RELEASE_STORE_FILE."
 }
 
 Invoke-NpmScript "build:web"

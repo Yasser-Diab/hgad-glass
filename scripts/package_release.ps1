@@ -43,19 +43,46 @@ if ($installer) {
   Write-Host "No Windows installer found yet. Run npm run dist:win first to include it."
 }
 
-$apkNames = @(
-  "YDGlassManager-Full-$version.apk",
-  "YDGlassManager-OrderStatus-$version.apk"
-)
-$apks = @($apkNames | ForEach-Object {
-  Get-Item -LiteralPath (Join-Path $root "dist-android\$_") -ErrorAction SilentlyContinue
-})
-if ($apks.Count -eq $apkNames.Count) {
-  foreach ($apk in $apks) {
-    Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $releaseDir $apk.Name) -Force
+$apkGroups = @(
+  @{
+    Label = "full"
+    Names = @(
+      "YDGlassManager-Full-$version.apk",
+      "YDGlassManager-Full-Android-debug-v$version.apk"
+    )
+  },
+  @{
+    Label = "status"
+    Names = @(
+      "YDGlassManager-OrderStatus-$version.apk",
+      "YDGlassManager-OrderStatus-Android-debug-v$version.apk"
+    )
   }
-} else {
-  throw "Expected Android release APKs are missing. Run npm run android:release first."
+)
+$apks = @()
+$usingDebugAndroid = $false
+foreach ($group in $apkGroups) {
+  $apk = $null
+  foreach ($name in $group.Names) {
+    $candidate = Get-Item -LiteralPath (Join-Path $root "dist-android\$name") -ErrorAction SilentlyContinue
+    if ($candidate) {
+      $apk = $candidate
+      break
+    }
+  }
+  if (!$apk) {
+    throw "Expected Android $($group.Label) APK is missing. Run npm run android:release first; it will use debug APKs when release signing is unavailable."
+  }
+  if ($apk.Name -match "debug") {
+    $usingDebugAndroid = $true
+  }
+  $apks += $apk
+}
+foreach ($apk in $apks) {
+  Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $releaseDir $apk.Name) -Force
+}
+if ($usingDebugAndroid) {
+  Write-Warning "Release folder includes debug-signed Android APKs because production Android signing is unavailable."
 }
 
 $zipPath = Join-Path $releaseRoot "YDGlassManager_V$version`_release.zip"

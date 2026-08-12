@@ -4373,6 +4373,46 @@ function supabaseOrderRowPayload(row, index, orderId) {
   };
 }
 
+function supabaseIlikeExactPattern(value = "") {
+  return String(value || "").replace(/[\\%_]/g, "\\$&");
+}
+
+async function selectPartyByNameForPersistence(client, table, selectedName) {
+  const exact = await client.from(table).select("id, name").eq("name", selectedName).maybeSingle();
+  if (exact.error) throw exact.error;
+  if (exact.data?.id) return exact.data;
+
+  const byCaseInsensitiveName = await client
+    .from(table)
+    .select("id, name")
+    .ilike("name", supabaseIlikeExactPattern(selectedName))
+    .limit(20);
+  if (byCaseInsensitiveName.error) throw byCaseInsensitiveName.error;
+  const normalizedName = selectedName.toLocaleLowerCase();
+  return (byCaseInsensitiveName.data || []).find((row) => (
+    cleanName(row.name).toLocaleLowerCase() === normalizedName
+  )) || null;
+}
+
+function isDuplicatePartyNameError(error) {
+  const text = `${error?.code || ""} ${safeErrorMessage(error)}`;
+  return /23505|duplicate key value|unique constraint|customers.*name|suppliers.*name|name.*key/i.test(text);
+}
+
+async function persistLearnedGlassOptions(client, rows = []) {
+  const learnedGaps = [...new Set(rows.map((row) => cleanName(row.doubleGap)).filter(Boolean))]
+    .map((value) => ({ kind: "double_gap", value }));
+  if (!learnedGaps.length) return true;
+  try {
+    const learnedResult = await client.from("learned_options").upsert(learnedGaps, { onConflict: "kind,value" });
+    if (learnedResult.error) throw learnedResult.error;
+    return true;
+  } catch (error) {
+    console.warn(maskSensitiveText(`Saved order, but failed to persist learned glass options: ${safeErrorMessage(error)}`));
+    return false;
+  }
+}
+
 async function saveOrderToSupabase(client, normalized) {
   let persistenceStage = {
     operation: "resolve parties",
@@ -4500,18 +4540,7 @@ async function saveOrderToSupabase(client, normalized) {
   }
   if (!saved?.data?.id) throw new Error("تعذر إنشاء رقم فريد للطلب، ولم يتم فقد أي من البيانات المدخلة. يرجى إعادة المحاولة.");
   const orderId = saved.data.id;
-  const learnedGaps = [...new Set(normalized.rows.map((row) => cleanName(row.doubleGap)).filter(Boolean))]
-    .map((value) => ({ kind: "double_gap", value }));
-  if (learnedGaps.length) {
-    persistenceStage = {
-      operation: "save learned glass options",
-      table: "learned_options",
-      function: "",
-      parameters: { option_count: learnedGaps.length }
-    };
-    const learnedResult = await client.from("learned_options").upsert(learnedGaps, { onConflict: "kind,value" });
-    if (learnedResult.error) throw learnedResult.error;
-  }
+  await persistLearnedGlassOptions(client, normalized.rows);
   return createDraft({
     ...normalized,
     id: orderId,
@@ -4623,9 +4652,8 @@ async function selectedPartyForPersistence(client, table, id, name, label) {
     }
   }
 
-  const byName = await client.from(table).select("id, name").eq("name", selectedName).maybeSingle();
-  if (byName.error) throw byName.error;
-  if (byName.data?.id) return byName.data;
+  const byName = await selectPartyByNameForPersistence(client, table, selectedName);
+  if (byName?.id) return byName;
 
   const insertPayload = table === "suppliers"
     ? { name: selectedName, opening_balance: 0 }
@@ -4633,6 +4661,10 @@ async function selectedPartyForPersistence(client, table, id, name, label) {
   let inserted = await client.from(table).insert(insertPayload).select("id, name").single();
   if (inserted.error && missingSupabaseSchemaColumn(inserted.error, table) === "opening_balance") {
     inserted = await client.from(table).insert({ name: selectedName }).select("id, name").single();
+  }
+  if (inserted.error && isDuplicatePartyNameError(inserted.error)) {
+    const existingAfterDuplicate = await selectPartyByNameForPersistence(client, table, selectedName);
+    if (existingAfterDuplicate?.id) return existingAfterDuplicate;
   }
   if (inserted.error) throw inserted.error;
   return inserted.data;
@@ -6680,6 +6712,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   const [validationErrors, setValidationErrors] = useState([]);
   const [activeCell, setActiveCell] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
+  const [cellDraftValues, setCellDraftValues] = useState({});
   const [selectedRange, setSelectedRange] = useState(null);
   const [selectedRowIds, setSelectedRowIds] = useState([]);
   const [rowContextMenu, setRowContextMenu] = useState(null);
@@ -6972,11 +7005,24 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const escapedColumn = window.CSS?.escape ? CSS.escape(String(column)) : String(column).replace(/["\\]/g, "\\$&");
     return `.table-control[data-row="${rowIndex}"][data-col="${escapedColumn}"]`;
   }
-  function isDropdownCellColumn(column = "") {
-    return column === "mode" ||
-      column === "extraDirection" ||
+  function isComboCellColumn(column = "") {
+    return /^layer\d+-(glassType|company|thickness)$/.test(String(column || "")) ||
       column === "doubleGap" ||
       column === "triplexPvb";
+  }
+  function isNativeSelectDropdownColumn(column = "") {
+    return column === "mode" ||
+      column === "extraDirection";
+  }
+  function isDropdownCellColumn(column = "") {
+    return isNativeSelectDropdownColumn(column) ||
+      isComboCellColumn(column);
+  }
+  function isDropdownActivationTarget(eventTarget) {
+    if (!eventTarget) return false;
+    const tableControl = eventTarget.closest?.(".table-control");
+    if (tableControl?.tagName === "SELECT") return true;
+    return !!eventTarget.closest?.(".combo-toggle");
   }
   function openEntryTableDropdown(rowIndex, column, attempt = 0) {
     const target = document.querySelector(tableControlSelector(rowIndex, column));
@@ -7016,6 +7062,9 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     setEditingCell(nextCell);
     window.requestAnimationFrame(() => openEntryTableDropdown(rowIndex, column));
   }
+  function cellDraftKey(rowIndex, column, rowId = rowIdAt(rowIndex)) {
+    return `${rowId || rowIndex}:${column}`;
+  }
   function focusEntryTableControl(rowIndex, column = "rowCode", attempt = 0, options = {}) {
     const fallbackColumns = options.exact ? [column] : [column, "rowCode", "notes", "quantity", "mode"];
     const selectors = fallbackColumns.map((item) => tableControlSelector(rowIndex, item)).join(", ");
@@ -7023,7 +7072,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (target) {
       target.closest(".table-entry")?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
       if (options.focus === false) return true;
-      restoreRendererInputFocus({ preferredElement: target, select: options.select, caretEnd: options.caretEnd });
+      restoreRendererInputFocus({ preferredElement: target, select: options.select, caretEnd: options.caretEnd, immediate: options.immediate });
       return true;
     }
     if (attempt < 8) {
@@ -7034,6 +7083,8 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     return false;
   }
   function cellRenderValue(_rowIndex, _column, fallback = "") {
+    const key = cellDraftKey(_rowIndex, _column);
+    if (Object.prototype.hasOwnProperty.call(cellDraftValues, key)) return cellDraftValues[key];
     return fallback;
   }
   function applyEntryCellValueToRow(row, column, value) {
@@ -7073,20 +7124,44 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     }
     return { row: nextRow, ok: true };
   }
-  function commitEditingCell() {
+  function commitEditingCell(cell = editingCell) {
+    if (cell?.column) {
+      const rowIndex = rowIndexForCell(cell);
+      if (rowIndex >= 0) {
+        const key = cellDraftKey(rowIndex, cell.column, cell.rowId);
+        if (Object.prototype.hasOwnProperty.call(cellDraftValues, key)) {
+          const draftValue = cellDraftValues[key];
+          const committedValue = /^layer\d+-thickness$/.test(cell.column)
+            ? normalizeThicknessText(draftValue)
+            : draftValue;
+          setCellValue(rowIndex, cell.column, committedValue, { remember: false });
+          setCellDraftValues((current) => {
+            if (!Object.prototype.hasOwnProperty.call(current, key)) return current;
+            const next = { ...current };
+            delete next[key];
+            return next;
+          });
+        }
+      }
+    }
     setEditingCell(null);
     return true;
   }
   function handleCellDraftChange(rowIndex, column, value, options = {}) {
+    const nextCell = makeTableCell(rowIndex, column);
+    if (sameTableCell(editingCell, nextCell)) {
+      const key = cellDraftKey(rowIndex, column, nextCell.rowId);
+      setCellDraftValues((current) => ({ ...current, [key]: value }));
+    }
     setCellValue(rowIndex, column, value, {
       label: options.label || "تعديل خلية",
       remember: options.remember
     });
-    if (options.commit) setEditingCell(null);
+    if (options.commit) commitEditingCell(nextCell);
   }
   function handleCellBlur(rowIndex, column) {
     if (isEditingCell(rowIndex, column)) {
-      setEditingCell(null);
+      commitEditingCell(makeTableCell(rowIndex, column));
     }
   }
   function setCellValue(rowIndex, column, value, options = {}) {
@@ -7404,6 +7479,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       setActiveCell(nextCell);
       setSelectedRange({ anchor: nextCell, focus: nextCell });
       setEditingCell(nextCell);
+      setCellDraftValues((current) => ({ ...current, [cellDraftKey(rowIndex, cell.column, nextCell.rowId)]: initialText }));
     });
     if (hasInitialText) {
       flushSync(() => {
@@ -7557,11 +7633,13 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (event.button !== 0) return;
     const nextCell = makeTableCell(rowIndex, column);
     const eventTarget = event.target instanceof Element ? event.target : null;
+    const directControl = eventTarget?.closest?.(".table-control");
+    const rangeModifier = event.shiftKey || event.ctrlKey || event.metaKey;
     if (eventTarget && isEditableDomTarget(eventTarget) && sameTableCell(editingCell, nextCell)) {
       event.stopPropagation();
       return;
     }
-    if (isDropdownCellColumn(column)) {
+    if (!rangeModifier && isDropdownCellColumn(column) && isDropdownActivationTarget(eventTarget)) {
       event.stopPropagation();
       activateDropdownCell(rowIndex, column);
       return;
@@ -7569,6 +7647,14 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     window.dispatchEvent(new Event("glass-orders-cancel-interactions"));
     if (editingCell && !sameTableCell(editingCell, nextCell)) {
       commitEditingCell();
+    }
+    if (!rangeModifier && directControl) {
+      preventCancelableDefault(event);
+      event.stopPropagation();
+      setEditingCell(null);
+      setSelectionToCell(nextCell);
+      window.requestAnimationFrame(() => focusTableShell());
+      return;
     }
     preventCancelableDefault(event);
     event.stopPropagation();
@@ -7579,7 +7665,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
   function handleCellDoubleClick(rowIndex, column, event) {
     preventCancelableDefault(event);
     event.stopPropagation();
-    if (isDropdownCellColumn(column)) {
+    if (isNativeSelectDropdownColumn(column)) {
       activateDropdownCell(rowIndex, column);
       return;
     }
@@ -7930,13 +8016,13 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (target && isEditableDomTarget(target) && editing) {
       if (event.key === "Tab") {
         claimKey();
-        setEditingCell(null);
+        commitEditorForKey();
         moveFromCell(rowIndex, column, 0, event.shiftKey ? -1 : 1, false, { allowAddRow: false });
       } else if (event.key === "Enter") {
         claimKey();
         event.__glassTableHandled = true;
         if (event.nativeEvent) event.nativeEvent.__glassTableHandled = true;
-        setEditingCell(null);
+        commitEditorForKey();
         moveFromCell(rowIndex, column, 1, 0, false, { allowAddRow: true });
       }
       return;
@@ -7954,7 +8040,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (event.key === "Escape") {
       if (editing) {
         claimKey();
-        setEditingCell(null);
+        commitEditorForKey();
         focusTableCell(rowIndex, column);
       }
       return;
@@ -8345,7 +8431,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
                 onCellPointerDown={handleCellPointerDown}
                 onCellDoubleClick={handleCellDoubleClick}
                 onCellCommitMove={(rowIndex, column) => {
-                  setEditingCell(null);
+                  commitEditingCell(makeTableCell(rowIndex, column));
                   moveFromCell(rowIndex, column, 1, 0, false);
                 }}
                 onCopyDownCell={(column) => copyCellValueDown(index, column, { confirm: true })}
@@ -8711,7 +8797,7 @@ function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptio
                   <Combo {...comboCellProps(`layer${layerIndex}-company`)} editing={isCellEditing(index, `layer${layerIndex}-company`)} value={cellValue(index, `layer${layerIndex}-company`, layer.company)} options={smartOptions.companies} onChange={(company) => onCellValueChange(index, `layer${layerIndex}-company`, company)} onSuggestionCommit={(company) => commitSuggestionAndMove(`layer${layerIndex}-company`, company, (nextValue) => updateLayer(layerIndex, { company: nextValue }))} />
                 </FillDownCell>
                 <FillDownCell column={`layer${layerIndex}-thickness`} onCopyDown={onCopyDownCell}>
-                  <Combo {...comboCellProps(`layer${layerIndex}-thickness`)} editing={isCellEditing(index, `layer${layerIndex}-thickness`)} value={cellValue(index, `layer${layerIndex}-thickness`, layer.thickness)} options={smartOptions.thicknesses} onChange={(thickness) => onCellValueChange(index, `layer${layerIndex}-thickness`, thickness)} onSuggestionCommit={(thickness) => commitSuggestionAndMove(`layer${layerIndex}-thickness`, thickness, (nextValue) => updateLayer(layerIndex, { thickness: nextValue }))} />
+                  <Combo {...comboCellProps(`layer${layerIndex}-thickness`)} editing={isCellEditing(index, `layer${layerIndex}-thickness`)} dir="ltr" value={cellValue(index, `layer${layerIndex}-thickness`, layer.thickness)} options={smartOptions.thicknesses} onChange={(thickness) => onCellValueChange(index, `layer${layerIndex}-thickness`, thickness)} onSuggestionCommit={(thickness) => commitSuggestionAndMove(`layer${layerIndex}-thickness`, thickness, (nextValue) => updateLayer(layerIndex, { thickness: nextValue }))} />
                 </FillDownCell>
                 <FillDownCell column={`layer${layerIndex}-unitPrice`} onCopyDown={onCopyDownCell}>
                   <input {...tableCellProps(`layer${layerIndex}-unitPrice`)} inputMode="decimal" dir="ltr" value={cellValue(index, `layer${layerIndex}-unitPrice`, layer.unitPrice)} onChange={(e) => onCellValueChange(index, `layer${layerIndex}-unitPrice`, e.target.value)} placeholder="سعر/م2" title="سعر هذه الطبقة لكل متر مربع" />
@@ -11762,9 +11848,9 @@ function OrderReport({ order, currentUser, logoSrc }) {
       </div>
       {!includeDrawingPages && (
         <div className="report-table order-report-table">
-          <div className="report-row order-report-row head"><span>NO.</span><span className="description-header">البيان</span><span className="code-header">الكود</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
+          <div className="report-row order-report-row head"><span>NO.</span><span className="code-header">الكود</span><span className="description-header">البيان</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
           {reportRows.map((row, index) => <OrderReportLineGroup key={row.id || `row-${index + 1}`} row={row} index={index} />)}
-          <div className="report-row order-report-row subtotal"><span></span><span className="subtotal-label description-cell">الإجمالي</span><span className="code-cell"></span><span></span><span></span><span className="keep-line">{money(totals.pieces)}</span><span className="keep-line">{square(totals.area)}</span></div>
+          <div className="report-row order-report-row subtotal"><span></span><span className="code-cell"></span><span className="subtotal-label description-cell">الإجمالي</span><span></span><span></span><span className="keep-line">{money(totals.pieces)}</span><span className="keep-line">{square(totals.area)}</span></div>
         </div>
       )}
       {includeDrawingPages && (
@@ -11785,8 +11871,8 @@ function OrderReportLineGroup({ row, index }) {
     return (
       <div className="report-row order-report-row" key={line.key}>
         <span className="keep-line">{line.rowNumber}</span>
-        <span className="report-description description-cell" dir="rtl"><bdi><ArabicMixedText value={line.description} /></bdi></span>
         <span dir="ltr" className="keep-line code-cell">{line.code}</span>
+        <span className="report-description description-cell" dir="rtl"><bdi><ArabicMixedText value={line.description} /></bdi></span>
         <span className="keep-line">{line.width}</span>
         <span className="keep-line">{line.height}</span>
         <span className="keep-line">{line.quantity}</span>
@@ -11802,6 +11888,7 @@ function OrderReportLineGroup({ row, index }) {
       key={root.key}
     >
       <span className="keep-line split-root-cell split-root-number">{root.rowNumber}</span>
+      <span dir="ltr" className="keep-line code-cell split-root-cell split-root-code">{root.code}</span>
       <span className="report-description description-cell split-root-cell split-root-description" dir="rtl">
         <bdi className="split-root-summary"><ArabicMixedText value={root.description} /></bdi>
         <span className="split-layer-list">
@@ -11812,7 +11899,6 @@ function OrderReportLineGroup({ row, index }) {
           ))}
         </span>
       </span>
-      <span dir="ltr" className="keep-line code-cell split-root-cell split-root-code">{root.code}</span>
       {lines.map((line, layerIndex) => (
         <React.Fragment key={`${line.key}-values`}>
           <span className={`keep-line split-layer-value ${layerIndex === lines.length - 1 ? "last" : ""}`} style={{ gridColumn: 4, gridRow: layerIndex + 1 }}>{line.width}</span>
@@ -11836,7 +11922,7 @@ function DrawingReportPage({ row, index, order = {}, issueDateText = "" }) {
         <span>التاريخ: <bdi dir="ltr">{issueDateText}</bdi></span>
       </div>
       <div className="report-table order-report-table drawing-item-table">
-        <div className="report-row order-report-row head"><span>NO.</span><span className="description-header">البيان</span><span className="code-header">الكود</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
+        <div className="report-row order-report-row head"><span>NO.</span><span className="code-header">الكود</span><span className="description-header">البيان</span><span>العرض سم</span><span>الطول سم</span><span>العدد</span><span>م2</span></div>
         <OrderReportLineGroup row={row} index={index} />
       </div>
       {panels.length ? (
@@ -14474,6 +14560,7 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
         }}
         onKeyDown={handleKeyDown}
         dir={inputProps.dir || "auto"}
+        readOnly={inputProps.readOnly || !editing}
         autoComplete="off"
         aria-expanded={open}
         aria-autocomplete="list"
@@ -14485,7 +14572,10 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
         onPointerDown={(event) => {
           preventCancelableDefault(event);
           event.stopPropagation();
-          if (!editing) return;
+          if (!editing) {
+            inputProps.onPointerDown?.(event);
+            return;
+          }
           window.clearTimeout(openTimerRef.current);
           setOpen((current) => !current);
           window.requestAnimationFrame(() => inputRef.current?.focus?.());
@@ -14789,14 +14879,15 @@ function reportPrintCss() {
     .order-report-row {
       grid-template-columns:
         minmax(40px, .42fr)
+        minmax(54px, .54fr)
         minmax(0, 4.2fr)
-        minmax(44px, .46fr)
         minmax(62px, .64fr)
         minmax(62px, .64fr)
         minmax(46px, .46fr)
         minmax(72px, .74fr);
     }
     .split-layer-report-group {
+      --split-layer-separator: color-mix(in srgb, var(--report-border) 36%, transparent);
       grid-template-rows: repeat(var(--split-layer-count, 2), minmax(44px, auto));
       background: color-mix(in srgb, var(--report-row-background) 92%, #eaf3ff);
     }
@@ -14805,7 +14896,7 @@ function reportPrintCss() {
     }
     .split-root-cell {
       grid-row: 1 / calc(var(--split-layer-count, 2) + 1);
-      border-bottom: 2px solid var(--report-border);
+      border-bottom: 1px solid var(--report-border);
       background: color-mix(in srgb, var(--report-row-background) 97%, #edf6ff);
     }
     .split-root-number {
@@ -14813,7 +14904,7 @@ function reportPrintCss() {
       font-weight: 900;
     }
     .split-root-description {
-      grid-column: 2;
+      grid-column: 3;
       display: flex;
       flex-direction: column;
       align-items: stretch;
@@ -14834,7 +14925,7 @@ function reportPrintCss() {
       white-space: normal;
       overflow-wrap: anywhere;
     }
-    .split-root-code { grid-column: 3; }
+    .split-root-code { grid-column: 2; }
     .split-layer-list {
       display: grid;
       grid-template-rows: repeat(var(--split-layer-count, 2), minmax(36px, 1fr));
@@ -14866,16 +14957,23 @@ function reportPrintCss() {
     }
     .split-layer-list-item:not(:last-child),
     .split-layer-value:not(.last) {
-      border-bottom: 1px solid color-mix(in srgb, var(--report-border) 36%, transparent);
+      border-bottom: 1px solid var(--split-layer-separator);
     }
     .split-layer-value {
       min-height: 44px;
-      border-bottom-color: color-mix(in srgb, var(--report-border) 36%, transparent);
+      border-bottom-color: var(--split-layer-separator);
       background: color-mix(in srgb, var(--report-row-background) 95%, #eef7ff);
     }
     .split-layer-value.last {
-      border-bottom-width: 2px;
+      border-bottom-width: 1px;
       border-bottom-color: var(--report-border);
+    }
+    .report-row.split-layer-report-group > .split-layer-value:not(.last) {
+      border-bottom: 1px solid var(--split-layer-separator);
+    }
+    .report-row.split-layer-report-group > .split-layer-value.last,
+    .report-row.split-layer-report-group > .split-root-cell {
+      border-bottom: 1px solid var(--report-border);
     }
     .order-status-report {
       min-width: 0;
@@ -15597,8 +15695,8 @@ function preparePdfClone(clonedDocument, clonedElement) {
     .pdf-host .order-report-row {
       grid-template-columns:
         minmax(40px, .42fr)
+        minmax(54px, .54fr)
         minmax(0, 4.2fr)
-        minmax(44px, .46fr)
         minmax(62px, .64fr)
         minmax(62px, .64fr)
         minmax(46px, .46fr)
@@ -15606,12 +15704,13 @@ function preparePdfClone(clonedDocument, clonedElement) {
     }
     .pdf-export-root .split-layer-report-group,
     .pdf-host .split-layer-report-group {
+      --split-layer-separator: color-mix(in srgb, var(--report-border) 36%, transparent) !important;
       grid-template-rows: repeat(var(--split-layer-count, 2), minmax(44px, auto)) !important;
     }
     .pdf-export-root .split-root-cell,
     .pdf-host .split-root-cell {
       grid-row: 1 / calc(var(--split-layer-count, 2) + 1) !important;
-      border-bottom: 2px solid var(--report-border) !important;
+      border-bottom: 1px solid var(--report-border) !important;
       background: color-mix(in srgb, var(--report-row-background) 97%, #edf6ff) !important;
     }
     .pdf-export-root .split-root-number,
@@ -15621,7 +15720,7 @@ function preparePdfClone(clonedDocument, clonedElement) {
     }
     .pdf-export-root .split-root-description,
     .pdf-host .split-root-description {
-      grid-column: 2 !important;
+      grid-column: 3 !important;
       display: flex !important;
       flex-direction: column !important;
       align-items: stretch !important;
@@ -15640,7 +15739,7 @@ function preparePdfClone(clonedDocument, clonedElement) {
       overflow-wrap: anywhere !important;
     }
     .pdf-export-root .split-root-code,
-    .pdf-host .split-root-code { grid-column: 3 !important; }
+    .pdf-host .split-root-code { grid-column: 2 !important; }
     .pdf-export-root .split-layer-list,
     .pdf-host .split-layer-list {
       grid-template-rows: repeat(var(--split-layer-count, 2), minmax(36px, 1fr)) !important;
@@ -15667,13 +15766,13 @@ function preparePdfClone(clonedDocument, clonedElement) {
     }
     .pdf-export-root .split-layer-value:not(.last),
     .pdf-host .split-layer-value:not(.last) {
-      border-bottom-color: color-mix(in srgb, var(--report-border) 36%, transparent) !important;
+      border-bottom-color: var(--split-layer-separator) !important;
       border-bottom-width: 1px !important;
     }
     .pdf-export-root .split-layer-value.last,
     .pdf-host .split-layer-value.last {
       border-bottom-color: var(--report-border) !important;
-      border-bottom-width: 2px !important;
+      border-bottom-width: 1px !important;
     }
     .pdf-export-root .report-row > span,
     .pdf-host .report-row > span {
@@ -15687,11 +15786,11 @@ function preparePdfClone(clonedDocument, clonedElement) {
     .pdf-export-root .split-layer-value.last,
     .pdf-host .split-layer-value.last {
       border-bottom-color: var(--report-border) !important;
-      border-bottom-width: 2px !important;
+      border-bottom-width: 1px !important;
     }
     .pdf-export-root .split-layer-value:not(.last),
     .pdf-host .split-layer-value:not(.last) {
-      border-bottom-color: color-mix(in srgb, var(--report-border) 36%, transparent) !important;
+      border-bottom-color: var(--split-layer-separator) !important;
       border-bottom-width: 1px !important;
     }
     .pdf-export-root .report-row > span:first-child,
@@ -15701,6 +15800,16 @@ function preparePdfClone(clonedDocument, clonedElement) {
     .pdf-export-root .report-row:last-child > span,
     .pdf-host .report-row:last-child > span {
       border-bottom: 0 !important;
+    }
+    .pdf-export-root .report-row.split-layer-report-group > .split-layer-value:not(.last),
+    .pdf-host .report-row.split-layer-report-group > .split-layer-value:not(.last) {
+      border-bottom: 1px solid var(--split-layer-separator) !important;
+    }
+    .pdf-export-root .report-row.split-layer-report-group > .split-layer-value.last,
+    .pdf-host .report-row.split-layer-report-group > .split-layer-value.last,
+    .pdf-export-root .report-row.split-layer-report-group > .split-root-cell,
+    .pdf-host .report-row.split-layer-report-group > .split-root-cell {
+      border-bottom: 1px solid var(--report-border) !important;
     }
     .pdf-export-root .description-header,
     .pdf-export-root .description-cell,
@@ -16652,8 +16761,8 @@ async function exportOrderExcel(order) {
       const totals = rowTotals(row);
       return [
         index + 1,
-        rowDescription(row),
         row.code || "",
+        rowDescription(row),
         rowHasPanels(row) ? Number(rowMaxWidthCm(row).toFixed(1)) : Math.max(...row.layers.map((layer) => numberValue(layer.width))),
         rowHasPanels(row) ? Number(rowMaxHeightCm(row).toFixed(1)) : Math.max(...row.layers.map((layer) => numberValue(layer.height))),
         rowPanelPhysicalCount(row),
@@ -16670,7 +16779,7 @@ async function exportOrderExcel(order) {
       ["العميل", order.customerName || "", "المورد", order.supplierName || ""],
       ["المشروع", order.project || "", "نوع الطلب", order.entryMode === "drawings" ? "طلب شراء برسم" : "طلب زجاج عادي"],
       [],
-      ["م", "البيان", "الكود", "العرض سم", "الطول سم", "العدد", "المساحة م2"],
+      ["م", "الكود", "البيان", "العرض سم", "الطول سم", "العدد", "المساحة م2"],
       ...itemRows,
       [],
       ["الإجمالي", "", "", "", "", totals.pieces, Number(totals.area.toFixed(3))]
@@ -16684,8 +16793,8 @@ async function exportOrderExcel(order) {
     ];
     ws["!cols"] = [
       { wch: 8 },
-      { wch: 58 },
       { wch: 18 },
+      { wch: 58 },
       { wch: 12 },
       { wch: 12 },
       { wch: 10 },

@@ -68,22 +68,31 @@ test("normal typing, native caret keys, paste, and composition are not hijacked"
   assert.match(keyHandler, /event\.isComposing \|\| event\.nativeEvent\?\.isComposing/);
 });
 
-test("selected cells start editing only from explicit edit actions", () => {
+test("direct table-cell clicks select, while double-clicks enter edit mode", () => {
   const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
   const rowEditorSource = sourceSection("function GlassRowEditor(", "function thicknessMmValue(");
   const pointerHandler = sourceSection("function handleCellPointerDown(", "function handleCellDoubleClick(");
   const doubleClickHandler = sourceSection("function handleCellDoubleClick(", "function columnForRowNear(");
+  const directControlStart = pointerHandler.indexOf("if (!rangeModifier && directControl)");
+  const directControlBranch = pointerHandler.slice(
+    directControlStart,
+    pointerHandler.indexOf("    preventCancelableDefault(event);\n    event.stopPropagation();\n    setEditingCell(null);\n    beginRangeDrag", directControlStart)
+  );
 
   assert.match(rowEditorSource, /onDoubleClick: \(event\) => onCellDoubleClick\(index, column, event\)/);
   assert.match(entrySource, /onCellDoubleClick=\{handleCellDoubleClick\}/);
   assert.match(pointerHandler, /isEditableDomTarget\(eventTarget\) && sameTableCell\(editingCell, nextCell\)/);
+  assert.match(pointerHandler, /const directControl = eventTarget\?\.closest\?\.\("\.table-control"\)/);
+  assert.match(pointerHandler, /const rangeModifier = event\.shiftKey \|\| event\.ctrlKey \|\| event\.metaKey/);
+  assert.match(directControlBranch, /setSelectionToCell\(nextCell\)/);
+  assert.match(directControlBranch, /focusTableShell\(\)/);
+  assert.doesNotMatch(directControlBranch, /startEditingCell|setEditingCell\(nextCell\)|focusEntryTableControl/);
   assert.match(pointerHandler, /setEditingCell\(null\)/);
-  assert.doesNotMatch(pointerHandler, /setEditingCell\(nextCell\)/);
   assert.match(pointerHandler, /beginRangeDrag\(rowIndex, column, event\)/);
   assert.match(doubleClickHandler, /startEditingCell\(makeTableCell\(rowIndex, column\)\)/);
 });
 
-test("only fixed-choice table dropdown cells open from one click and Space", () => {
+test("table dropdown controls and combo cells open from controls and Space", () => {
   const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
   const fillDownSource = sourceSection("function FillDownCell(", "function formatPanelNumber(");
   const pointerHandler = sourceSection("function handleCellPointerDown(", "function handleCellDoubleClick(");
@@ -92,25 +101,46 @@ test("only fixed-choice table dropdown cells open from one click and Space", () 
   const comboSource = sourceSection("function Combo(", "function SearchBox(");
 
   assert.match(entrySource, /function isDropdownCellColumn\(column = ""\)/);
-  assert.doesNotMatch(entrySource, /\^layer\\d\+\-\(glassType\|company\|thickness\)\$/);
+  assert.match(entrySource, /function isComboCellColumn\(column = ""\)/);
+  assert.match(entrySource, /function isNativeSelectDropdownColumn\(column = ""\)/);
+  assert.match(entrySource, /function isDropdownActivationTarget\(eventTarget\)/);
+  assert.match(entrySource, /\^layer\\d\+\-\(glassType\|company\|thickness\)\$/);
   assert.match(entrySource, /column === "mode"/);
   assert.match(entrySource, /column === "extraDirection"/);
   assert.match(entrySource, /column === "doubleGap"/);
   assert.match(entrySource, /column === "triplexPvb"/);
+  assert.match(entrySource, /isComboCellColumn\(column\)/);
   assert.match(entrySource, /function openEntryTableDropdown\(rowIndex, column/);
   assert.match(entrySource, /showPicker/);
   assert.match(entrySource, /glass-orders-open-combo/);
   assert.match(entrySource, /window\.dispatchEvent\(new Event\("glass-orders-cancel-interactions"\)\)/);
-  assert.match(pointerHandler, /if \(isDropdownCellColumn\(column\)\) \{[\s\S]*activateDropdownCell\(rowIndex, column\)/);
-  assert.match(doubleClickHandler, /if \(isDropdownCellColumn\(column\)\) \{[\s\S]*activateDropdownCell\(rowIndex, column\)/);
+  assert.match(pointerHandler, /if \(!rangeModifier && isDropdownCellColumn\(column\) && isDropdownActivationTarget\(eventTarget\)\) \{[\s\S]*activateDropdownCell\(rowIndex, column\)/);
+  assert.match(doubleClickHandler, /if \(isNativeSelectDropdownColumn\(column\)\) \{[\s\S]*activateDropdownCell\(rowIndex, column\)/);
+  assert.match(doubleClickHandler, /startEditingCell\(makeTableCell\(rowIndex, column\)\)/);
   assert.match(keyHandler, /event\.key === " " \|\| event\.code === "Space"/);
   assert.match(keyHandler, /activateDropdownCell\(rowIndex, column\)/);
   assert.match(comboSource, /node\.addEventListener\("glass-orders-open-combo", forceOpenCombo\)/);
   assert.match(comboSource, /onBlur=\{\(event\) => \{[\s\S]*setOpen\(false\)/);
+  assert.match(comboSource, /readOnly=\{inputProps\.readOnly \|\| !editing\}/);
+  assert.match(comboSource, /if \(!editing\) \{[\s\S]*inputProps\.onPointerDown\?\.\(event\);[\s\S]*return;/);
   assert.match(comboSource, /onPointerDown=\{\(event\) => \{[\s\S]*event\.stopPropagation\(\);[\s\S]*setOpen\(\(current\) => !current\)/);
   assert.match(comboSource, /className=\{optionIndex === activeIndex \? "combo-option active" : "combo-option"\}[\s\S]*onPointerDown=\{\(event\) => \{[\s\S]*commit\(option, \{ moveAfterCommit: false \}\)/);
   assert.match(fillDownSource, /onPointerDown=\{\(event\) => \{[\s\S]*event\.stopPropagation\(\);[\s\S]*onCopyDown\?\.\(column\)/);
   assert.doesNotMatch(fillDownSource, /onClick=\{\(event\) => \{[\s\S]*onCopyDown\?\.\(column\)/);
+});
+
+test("thickness cell editing preserves raw typed text until commit", () => {
+  const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
+  const rowEditorSource = sourceSection("function GlassRowEditor(", "function thicknessMmValue(");
+  const commitSource = sourceSection("function commitEditingCell(", "function handleCellDraftChange(");
+  const changeHandler = sourceSection("function handleCellDraftChange(", "function handleCellBlur(");
+
+  assert.match(entrySource, /const \[cellDraftValues, setCellDraftValues\] = useState\(\{\}\)/);
+  assert.match(entrySource, /function cellDraftKey\(rowIndex, column/);
+  assert.match(entrySource, /Object\.prototype\.hasOwnProperty\.call\(cellDraftValues, key\)\) return cellDraftValues\[key\]/);
+  assert.match(changeHandler, /setCellDraftValues\(\(current\) => \(\{ \.\.\.current, \[key\]: value \}\)\)/);
+  assert.match(commitSource, /normalizeThicknessText\(draftValue\)/);
+  assert.match(rowEditorSource, /<Combo \{\.\.\.comboCellProps\(`layer\$\{layerIndex\}-thickness`\)\}[\s\S]*dir="ltr"/);
 });
 
 test("smart-table selected-but-not-editing cells use spreadsheet selection affordance", () => {

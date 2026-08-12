@@ -2521,20 +2521,40 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
 .supplier-order-row {
   grid-template-columns: minmax(110px, 1fr) 100px minmax(140px, 1.2fr) 110px 118px auto;
 }
+.workspace > .panel.manufacturing-panel > .panel-head {
+  position: static;
+  top: auto;
+  z-index: auto;
+  box-shadow: none;
+}
 .manufacturing-layout {
   display: grid;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  direction: ltr;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  grid-template-areas: "main sidebar";
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
+  height: clamp(520px, calc(100dvh - 220px), 760px);
+  min-height: 0;
+  overflow: hidden;
 }
 .manufacturing-sidebar {
+  grid-area: sidebar;
+  direction: rtl;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 .order-pick-list {
   display: grid;
   gap: 8px;
-  max-height: 68vh;
+  align-content: start;
+  min-height: 0;
+  max-height: none;
   overflow: auto;
   padding-inline-end: 4px;
 }
@@ -2542,6 +2562,7 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   display: grid;
   grid-template-columns: minmax(0, 1fr) 38px;
   align-items: stretch;
+  min-height: 104px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -2553,13 +2574,15 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
 }
 .order-pick-list .order-pick-select {
   display: grid;
-  justify-items: start;
-  text-align: start;
-  min-height: auto;
+  justify-items: center;
+  align-content: center;
+  text-align: center;
+  min-height: 104px;
   white-space: normal;
   border: 0;
   border-radius: 0;
   background: transparent;
+  padding: 12px 14px;
 }
 .order-pick-list .order-pick-edit {
   min-width: 38px;
@@ -2574,9 +2597,16 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   color: var(--muted);
 }
 .manufacturing-main {
+  grid-area: main;
+  direction: rtl;
   display: grid;
   gap: 12px;
   min-width: 0;
+  min-height: 0;
+  align-self: stretch;
+  align-content: start;
+  overflow: auto;
+  padding-inline-end: 2px;
 }
 .ticket-settings-grid {
   display: grid;
@@ -3533,18 +3563,19 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   color: var(--report-text);
   font-weight: 800;
 }
-.order-report-row { grid-template-columns: 44px minmax(320px, 3.3fr) minmax(54px, .48fr) minmax(70px, .68fr) minmax(70px, .68fr) minmax(52px, .48fr) minmax(76px, .74fr); }
+.order-report-row { grid-template-columns: 44px minmax(54px, .48fr) minmax(320px, 3.3fr) minmax(70px, .68fr) minmax(70px, .68fr) minmax(52px, .48fr) minmax(76px, .74fr); }
 .order-report-table .order-report-row {
   grid-template-columns:
     minmax(40px, .42fr)
+    minmax(54px, .54fr)
     minmax(0, 4.2fr)
-    minmax(44px, .46fr)
     minmax(62px, .64fr)
     minmax(62px, .64fr)
     minmax(46px, .46fr)
     minmax(72px, .74fr);
 }
 .split-layer-report-group {
+  --split-layer-separator: color-mix(in srgb, var(--report-border) 36%, transparent);
   grid-template-rows: repeat(var(--split-layer-count, 2), minmax(44px, auto));
   background: color-mix(in srgb, var(--report-row-background) 92%, #eaf3ff);
 }
@@ -3553,7 +3584,7 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
 }
 .split-root-cell {
   grid-row: 1 / calc(var(--split-layer-count, 2) + 1);
-  border-bottom: 2px solid var(--report-border);
+  border-bottom: 1px solid var(--report-border);
   background: color-mix(in srgb, var(--report-row-background) 97%, #edf6ff);
 }
 .split-root-number {
@@ -3561,7 +3592,7 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   font-weight: 900;
 }
 .split-root-description {
-  grid-column: 2;
+  grid-column: 3;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -3582,7 +3613,7 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.split-root-code { grid-column: 3; }
+.split-root-code { grid-column: 2; }
 .split-layer-list {
   display: grid;
   grid-template-rows: repeat(var(--split-layer-count, 2), minmax(36px, 1fr));
@@ -3614,16 +3645,23 @@ summary span { color: var(--muted); font-weight: 500; margin-inline-start: 8px; 
 }
 .split-layer-list-item:not(:last-child),
 .split-layer-value:not(.last) {
-  border-bottom: 1px solid color-mix(in srgb, var(--report-border) 36%, transparent);
+  border-bottom: 1px solid var(--split-layer-separator);
 }
 .split-layer-value {
   min-height: 44px;
-  border-bottom-color: color-mix(in srgb, var(--report-border) 36%, transparent);
+  border-bottom-color: var(--split-layer-separator);
   background: color-mix(in srgb, var(--report-row-background) 95%, #eef7ff);
 }
 .split-layer-value.last {
-  border-bottom-width: 2px;
+  border-bottom-width: 1px;
   border-bottom-color: var(--report-border);
+}
+.report-row.split-layer-report-group > .split-layer-value:not(.last) {
+  border-bottom: 1px solid var(--split-layer-separator);
+}
+.report-row.split-layer-report-group > .split-layer-value.last,
+.report-row.split-layer-report-group > .split-root-cell {
+  border-bottom: 1px solid var(--report-border);
 }
 .order-report-row.subtotal .subtotal-label {
   text-align: center;
@@ -5498,7 +5536,22 @@ pre {
   .dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-chart { grid-column: 1 / -1; }
   .dashboard-hero { align-items: stretch; flex-direction: column; }
-  .manufacturing-layout { grid-template-columns: 1fr; }
+  .manufacturing-layout {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "sidebar"
+      "main";
+    height: auto;
+    min-height: auto;
+    overflow: visible;
+  }
+  .manufacturing-sidebar {
+    grid-template-rows: auto minmax(300px, 45vh);
+  }
+  .order-pick-list {
+    min-height: 300px;
+    max-height: 45vh;
+  }
   .supplier-statement-controls,
   .supplier-branches { grid-template-columns: 1fr; }
   .supplier-statement-range { grid-template-columns: repeat(2, minmax(180px, 1fr)); }

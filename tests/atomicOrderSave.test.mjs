@@ -49,6 +49,20 @@ test("full Supabase order save uses one RPC for header, rows, and pruning", () =
   assert.match(saveSource, /p_rows:\s*rows/);
 });
 
+test("learned glass option persistence cannot fail a completed order save", () => {
+  const learnedSource = mainSource.slice(
+    mainSource.indexOf("async function persistLearnedGlassOptions("),
+    mainSource.indexOf("async function saveOrderToSupabase(")
+  );
+  const saveSource = sourceFunction("saveOrderToSupabase", "deleteOrderFromSupabase");
+
+  assert.match(saveSource, /await persistLearnedGlassOptions\(client, normalized\.rows\)/);
+  assert.match(learnedSource, /try \{[\s\S]*\.from\("learned_options"\)\.upsert\(learnedGaps, \{ onConflict: "kind,value" \}\)/);
+  assert.match(learnedSource, /catch \(error\) \{[\s\S]*console\.warn\(maskSensitiveText/);
+  assert.match(learnedSource, /return false;/);
+  assert.doesNotMatch(learnedSource, /throw error/);
+});
+
 test("delete Undo restores through the same full-order save path", () => {
   const undoStart = mainSource.indexOf("async function applyPersistedHistoryEntry");
   const undoEnd = mainSource.indexOf("async function undoHistory", undoStart);
