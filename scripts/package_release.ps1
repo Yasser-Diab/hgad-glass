@@ -4,8 +4,22 @@ $packageJson = Get-Content -Raw -LiteralPath (Join-Path $root "package.json") | 
 $version = $packageJson.version
 $releaseRoot = Join-Path $root "releases"
 $releaseDir = Join-Path $releaseRoot "YDGlassManager_V$version"
+$releaseRootDeliverableNames = @(
+  "YD-Glass-Manager-Setup-$version.exe",
+  "YDGlassManager-Full-$version.apk",
+  "YDGlassManager-Full-Android-debug-v$version.apk",
+  "YDGlassManager-OrderStatus-$version.apk",
+  "YDGlassManager-OrderStatus-Android-debug-v$version.apk"
+)
+$releaseDeliverables = @()
 
 New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+foreach ($name in $releaseRootDeliverableNames) {
+  $target = Join-Path $releaseRoot $name
+  if (Test-Path $target) {
+    Remove-Item -LiteralPath $target -Force
+  }
+}
 if (Test-Path $releaseDir) {
   Remove-Item -LiteralPath $releaseDir -Recurse -Force
 }
@@ -38,7 +52,9 @@ Copy-Item -LiteralPath (Join-Path $root "icons") -Destination $releaseDir -Recur
 
 $installer = Get-ChildItem -Path (Join-Path $root "dist-installer") -Filter "YD-Glass-Manager-Setup-*.exe" -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($installer) {
-  Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $releaseDir $installer.Name) -Force
+  $installerDestination = Join-Path $releaseDir $installer.Name
+  Copy-Item -LiteralPath $installer.FullName -Destination $installerDestination -Force
+  $releaseDeliverables += Get-Item -LiteralPath $installerDestination
 } else {
   Write-Host "No Windows installer found yet. Run npm run dist:win first to include it."
 }
@@ -79,10 +95,16 @@ foreach ($group in $apkGroups) {
   $apks += $apk
 }
 foreach ($apk in $apks) {
-  Copy-Item -LiteralPath $apk.FullName -Destination (Join-Path $releaseDir $apk.Name) -Force
+  $apkDestination = Join-Path $releaseDir $apk.Name
+  Copy-Item -LiteralPath $apk.FullName -Destination $apkDestination -Force
+  $releaseDeliverables += Get-Item -LiteralPath $apkDestination
 }
 if ($usingDebugAndroid) {
   Write-Warning "Release folder includes debug-signed Android APKs because production Android signing is unavailable."
+}
+
+foreach ($file in $releaseDeliverables) {
+  Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $releaseRoot $file.Name) -Force
 }
 
 $zipPath = Join-Path $releaseRoot "YDGlassManager_V$version`_release.zip"
@@ -91,3 +113,7 @@ Compress-Archive -Path (Join-Path $releaseDir "*") -DestinationPath $zipPath -Fo
 
 Write-Host "Release folder: $releaseDir"
 Write-Host "Release archive: $zipPath"
+Write-Host "Release root installers:"
+foreach ($file in $releaseDeliverables) {
+  Write-Host (Join-Path $releaseRoot $file.Name)
+}

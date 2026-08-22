@@ -17,4 +17,7 @@ test("package release falls back to debug Android APKs when signing is unavailab
   assert.match(packageReleaseScript, /YDGlassManager-OrderStatus-\$version\.apk/);
   assert.match(packageReleaseScript, /YDGlassManager-OrderStatus-Android-debug-v\$version\.apk/);
   assert.match(packageReleaseScript, /Release folder includes debug-signed Android APKs/);
+  assert.match(packageReleaseScript, /\$releaseRootDeliverableNames = @\(/);
+  assert.match(packageReleaseScript, /Copy-Item -LiteralPath \$file\.FullName -Destination \(Join-Path \$releaseRoot \$file\.Name\) -Force/);
+  assert.match(packageReleaseScript, /Release root installers:/);
 });
