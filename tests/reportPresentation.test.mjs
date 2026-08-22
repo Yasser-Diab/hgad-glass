@@ -41,6 +41,8 @@ test("Orders Status preview uses an isolated toolbar and width-safe report grid"
   const orderStatusFileBase = sourceBetween("function orderStatusReportFileBase(", "function readJsonSetting(");
   const orderStatusExcel = sourceBetween("async function exportOrderStatusExcel(", "async function exportStatementPdf(");
   const orderStatusPdf = sourceBetween("async function exportOrderStatusPdf(", "function exportPreviewExcel(");
+  const glassGroupingSource = sourceBetween("function glassDescriptionGroupKey(", "function matchesQuery(");
+  const glassTypeGroups = sourceBetween("function orderGlassTypeGroups(", "function receiptRecordedBy(");
   assert.match(previewModal, /report-preview-modal/);
   assert.match(previewModal, /report-preview-toolbar/);
   assert.match(previewModal, /report-preview-scroll/);
@@ -62,6 +64,12 @@ test("Orders Status preview uses an isolated toolbar and width-safe report grid"
   assert.match(styleSource, /\.order-status-report-row > span,\s*\.order-status-report-row > \.report-glass-breakdown\s*\{[\s\S]*border-inline-start/);
   assert.match(styleSource, /\.order-status-report-row > span,\s*\.order-status-report-row > \.report-glass-breakdown\s*\{[\s\S]*overflow-wrap:\s*break-word/);
   assert.match(styleSource, /\.order-status-report-row \.keep-line\s*\{[\s\S]*word-break:\s*normal/);
+  assert.match(glassGroupingSource, /replace\(GLASS_GROUP_CONTROL_CHARS,\s*""\)/);
+  assert.match(glassGroupingSource, /replace\(\s*\/\[\*＊\]\+\/g,\s*""\)/);
+  assert.match(glassGroupingSource, /toLocaleLowerCase\(\)/);
+  assert.match(glassTypeGroups, /const key = glassDescriptionGroupKey\(description\) \|\| description/);
+  assert.match(glassTypeGroups, /groups\.has\(key\)/);
+  assert.match(glassTypeGroups, /groups\.get\(key\)/);
 });
 
 test("order report splits only unequal double or triplex layer measurements into child layer rows", () => {

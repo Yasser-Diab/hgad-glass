@@ -56,6 +56,25 @@ const supabaseRefreshToken = env.TELEGRAM_SUPABASE_REFRESH_TOKEN || "";
 const telegramTopicName = env.TELEGRAM_TOPIC_NAME || "متابعة الكلف";
 const configuredTopicThreadId = Number(env.TELEGRAM_TOPIC_ID || env.TELEGRAM_MESSAGE_THREAD_ID || 0) || 0;
 const topicThreadByChat = new Map();
+const orderStatusLabels = {
+  ordered: "تم الطلب من المورد",
+  fabrication: "قيد التصنيع",
+  ready: "جاهز للاستلام",
+  partial: "استلام جزئي",
+  collected: "تم الاستلام",
+  pricing: "تسعير فقط",
+  cancelled: "ملغي"
+};
+const orderStatusAliases = {
+  open: "fabrication",
+  pending: "ordered",
+  received: "collected",
+  closed: "collected",
+  done: "collected",
+  canceled: "cancelled",
+  quote: "pricing",
+  priced: "pricing"
+};
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -133,6 +152,13 @@ function formatDate(value) {
   const date = value instanceof Date ? value : new Date(text);
   if (Number.isNaN(date.getTime())) return text;
   return new Intl.DateTimeFormat("ar-EG", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+
+function statusLabel(value) {
+  const raw = String(value ?? "").trim();
+  const normalized = raw.toLocaleLowerCase();
+  const mapped = orderStatusLabels[normalized] || orderStatusLabels[orderStatusAliases[normalized]];
+  return mapped || raw || "-";
 }
 
 function safeFileName(value) {
@@ -251,12 +277,16 @@ async function loadSupabase() {
   workbookRows = [];
   for (const order of orders || []) {
     const orderRows = byOrder.get(order.id) || [{}];
-    const totalQuantity = orderRows.reduce((sum, row) => sum + numberValue(row.quantity), 0);
-    const collected = numberValue(order.collected_pieces);
-    const remainingForOrder = Math.max(0, totalQuantity - collected);
+    const hasAnyExplicitReceived = orderRows.some((row) => row.received_quantity !== undefined && row.received_quantity !== null && row.received_quantity !== "");
+    let legacyReceivedRemaining = hasAnyExplicitReceived ? 0 : numberValue(order.collected_pieces);
     for (const row of orderRows) {
       const quantity = numberValue(row.quantity, 1);
-      const rowRemaining = normalizeArabic(order.status) === "collected" ? 0 : Math.min(quantity, remainingForOrder || quantity);
+      const explicitReceived = row.received_quantity !== undefined && row.received_quantity !== null && row.received_quantity !== "";
+      const rowReceived = explicitReceived
+        ? Math.max(0, Math.min(quantity, numberValue(row.received_quantity)))
+        : Math.max(0, Math.min(quantity, legacyReceivedRemaining));
+      if (!explicitReceived) legacyReceivedRemaining = Math.max(0, legacyReceivedRemaining - rowReceived);
+      const rowRemaining = Math.max(0, quantity - rowReceived);
       workbookRows.push({
         "العميل": order.customer_name || "",
         "المشروع": order.project || "",
@@ -266,11 +296,11 @@ async function loadSupabase() {
         "التاريخ": order.order_date || "",
         "سعر الإذن": row.supplier_cost ?? order.totals?.supplierCost ?? 0,
         "العدد": quantity,
-        "عدد الاستلام": Math.max(0, quantity - rowRemaining),
+        "عدد الاستلام": rowReceived,
         "العدد المتبقي": rowRemaining,
         "المساحة": row.area_m2 ?? 0,
         "نوع الزجاج": rowGlassDescription(row),
-        "حالة الاوردرات": order.status || ""
+        "حالة الاوردرات": statusLabel(order.status)
       });
     }
   }
@@ -341,6 +371,12 @@ async function loadDataSource() {
   return loadWorkbook();
 }
 
+async function refreshDataSourceForRequest() {
+  const count = await loadDataSource();
+  console.log(`Telegram bot refreshed ${count} rows from ${dataSource}.`);
+  return count;
+}
+
 function suppliers() {
   if (suppliersCache.length) return suppliersCache;
   const supplierColumn = findColumn(["المورد"]);
@@ -372,6 +408,8 @@ function totalsForRows(rows) {
 function searchReply(query, matches) {
   const first = matches[0] || {};
   const totals = totalsForRows(matches);
+  const workflowStatus = statusLabel(cell(first, ["حالة الاوردرات", "حالة الأوردرات", "الحالة"], ""));
+  const receiptStatus = totals.remaining > 0 ? "لم يتم الاستلام بالكامل" : "تم الاستلام من المورد";
   const details = [
     `تفاصيل رقم ${query}`,
     "------------------------",
@@ -386,7 +424,8 @@ function searchReply(query, matches) {
     `عدد الاستلام: ${Math.round(totals.received)}`,
     `العدد المتبقي: ${Math.round(totals.remaining)}`,
     `إجمالي العدد: ${Math.round(totals.quantity)}`,
-    `حالة الأوردر: ${totals.remaining > 0 ? "لم يتم الاستلام بالكامل" : "تم الاستلام من المورد"}`
+    `حالة الطلب: ${workflowStatus}`,
+    `حالة الاستلام: ${receiptStatus}`
   ];
   return details.join("\n");
 }
@@ -520,6 +559,7 @@ async function handleMessage(message) {
   const text = String(message.text || "").trim();
   const code = digitsOnlyMessage(text);
   if (!chatId || !code) return;
+  await refreshDataSourceForRequest();
   const matches = orderMatches(code);
   await sendMessage(chatId, matches.length ? searchReply(code, matches) : "لا توجد بيانات لهذا الرقم.", threadExtra(threadId));
 }

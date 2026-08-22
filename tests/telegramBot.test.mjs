@@ -78,3 +78,18 @@ test("packaged bot reads its token from telegram_excel_bot and stops retrying co
   assert.ok(packagedBotResource);
   assert.ok(packagedBotResource.filter.includes(".env"));
 });
+
+test("Telegram order lookups reload data and report workflow status separately from receipt progress", () => {
+  const handleMessage = functionSource(botSource, "handleMessage");
+  const loadSupabase = functionSource(botSource, "loadSupabase");
+  const searchReply = functionSource(botSource, "searchReply");
+
+  assert.match(botSource, /async function refreshDataSourceForRequest\(\)/);
+  assert.match(handleMessage, /await refreshDataSourceForRequest\(\)/);
+  assert.match(loadSupabase, /hasAnyExplicitReceived/);
+  assert.match(loadSupabase, /legacyReceivedRemaining/);
+  assert.match(loadSupabase, /"حالة الاوردرات":\s*statusLabel\(order\.status\)/);
+  assert.doesNotMatch(loadSupabase, /normalizeArabic\(order\.status\)\s*===\s*"collected"\s*\?\s*0/);
+  assert.match(searchReply, /حالة الطلب:/);
+  assert.match(searchReply, /حالة الاستلام:/);
+});
