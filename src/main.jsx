@@ -100,6 +100,7 @@ import {
   DESKTOP_AUTH_RECOVERY_REDIRECT_URL,
   establishSupabaseRecoverySession
 } from "./authRecovery.js";
+import { groupGlassReceiptEntries } from "./glassGrouping.js";
 import "./styles.css";
 
 const VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "0.0.0";
@@ -727,33 +728,6 @@ function cleanName(value) {
   return String(value || "").trim();
 }
 
-const GLASS_GROUP_CONTROL_CHARS = /[\u200f\u200e\u202a\u202b\u202c\u202d\u202e\ufeff\u0640\u200c\u200d\u2060]/g;
-const GLASS_GROUP_DIGITS = new Map([
-  ["٠", "0"], ["١", "1"], ["٢", "2"], ["٣", "3"], ["٤", "4"],
-  ["٥", "5"], ["٦", "6"], ["٧", "7"], ["٨", "8"], ["٩", "9"],
-  ["۰", "0"], ["۱", "1"], ["۲", "2"], ["۳", "3"], ["۴", "4"],
-  ["۵", "5"], ["۶", "6"], ["۷", "7"], ["۸", "8"], ["۹", "9"]
-]);
-
-function glassDescriptionGroupKey(value) {
-  return cleanName(value)
-    .normalize("NFKC")
-    .replace(GLASS_GROUP_CONTROL_CHARS, "")
-    .replace(/[٠-٩۰-۹]/g, (digit) => GLASS_GROUP_DIGITS.get(digit) || digit)
-    .replace(/[أإآٱ]/g, "ا")
-    .replace(/ى/g, "ي")
-    .replace(/ة/g, "ه")
-    .replace(/[‐‑‒–—―−]/g, "-")
-    .replace(/(\d+(?:[.,]\d+)?)\s*م\s*م/g, "$1مم")
-    .replace(/(\d+),(\d+)/g, "$1.$2")
-    .replace(/[*＊]+/g, "")
-    .replace(/\(\s*\)/g, "")
-    .replace(/\s*([/\\-])\s*/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLocaleLowerCase();
-}
-
 function matchesQuery(query, ...values) {
   const needle = cleanName(query).toLocaleLowerCase();
   if (!needle) return true;
@@ -871,27 +845,7 @@ function orderReceiptSummary(order) {
 }
 
 function orderGlassTypeGroups(order) {
-  const groups = new Map();
-  for (const entry of orderReceiptSummary(order).entries) {
-    const description = cleanName(entry.description) || "نوع زجاج غير محدد";
-    const key = glassDescriptionGroupKey(description) || description;
-    if (!groups.has(key)) {
-      groups.set(key, {
-        key: `glass-${entry.rowId}`,
-        description,
-        orderedQuantity: 0,
-        previouslyReceivedQuantity: 0,
-        remainingQuantity: 0,
-        entries: []
-      });
-    }
-    const group = groups.get(key);
-    group.orderedQuantity += entry.orderedQuantity;
-    group.previouslyReceivedQuantity += entry.previouslyReceivedQuantity;
-    group.remainingQuantity += entry.remainingQuantity;
-    group.entries.push(entry);
-  }
-  return [...groups.values()];
+  return groupGlassReceiptEntries(order, orderReceiptSummary(order).entries);
 }
 
 function receiptRecordedBy(currentUser) {
