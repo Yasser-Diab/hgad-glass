@@ -130,6 +130,8 @@ function dateBefore(date, fromDate) {
 }
 
 function defaultOrderCost(order = {}) {
+  const lumpSum = firstValue(order, ["supplierLumpSumCost", "supplier_lump_sum_cost"]);
+  if (lumpSum !== "") return finiteNumber(lumpSum);
   const directCost = firstValue(order, ["supplierCost", "supplier_cost"]);
   return finiteNumber(directCost !== ""
     ? directCost

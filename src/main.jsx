@@ -11,6 +11,7 @@ import {
   BarChart3,
   Bot,
   Building2,
+  CalendarRange,
   CheckCircle2,
   ClipboardList,
   Circle,
@@ -81,6 +82,14 @@ import {
   validateOrderRowForSave,
   validationErrorKey
 } from "./orderSaveValidation.js";
+import { buildOrderReadinessChecklist } from "./orderReadiness.js";
+import {
+  effectiveSupplierCost,
+  hasSupplierLumpSumCost,
+  supplierCostSource,
+  supplierLumpSumCost,
+  supplierLumpSumCostState
+} from "./orderCostOverride.js";
 import {
   RECEIPT_STATUS,
   ReceiptValidationError,
@@ -102,6 +111,7 @@ import {
 } from "./authRecovery.js";
 import { groupGlassReceiptEntries } from "./glassGrouping.js";
 import "./styles.css";
+import "./styles/theme-v013.css";
 
 const VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : "0.0.0";
 const APP_VARIANT = import.meta.env.VITE_APP_VARIANT === "status" || import.meta.env.MODE === "status" ? "status" : "full";
@@ -110,7 +120,7 @@ const APP_NAME = "Y.D";
 const FULL_APP_NAME = "Y.D Glass Manager";
 const BRAND_NAME = "Y.D GLASS MANAGER";
 const SUB_NAME = "إدارة أوامر الزجاج والموردين والتصنيع";
-const PRODUCT_LINE = "A Y.D Software Product";
+const PRODUCT_LINE = "Developed by Eng. Yasser Diab";
 const RELEASES_URL = "https://github.com/Yasser-Diab/hgad-glass/releases";
 const GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/Yasser-Diab/hgad-glass/releases/latest";
 const GITHUB_RELEASES_API = "https://api.github.com/repos/Yasser-Diab/hgad-glass/releases";
@@ -240,14 +250,14 @@ const ORDER_PREFIX = "GO-";
 const ORDER_SEQUENCE_WIDTH = 6;
 
 const ORDER_STATUS_DEFS = [
-  { value: "ordered", label: "تم الطلب من المورد", tone: "info", payable: true, pending: true },
-  { value: "fabrication", label: "قيد التصنيع", tone: "warning", payable: true, pending: true },
-  { value: "ready", label: "جاهز للاستلام", tone: "success", payable: true, pending: true },
-  { value: "partial", label: "استلام جزئي", tone: "warning", payable: true, pending: true },
-  { value: "collected", label: "تم الاستلام", tone: "done", payable: true, pending: false },
-  { value: "pricing", label: "تسعير فقط", tone: "neutral", payable: false, pending: false },
-  { value: "cancelled", label: "ملغي", tone: "danger", payable: false, pending: false },
-  { value: "draft", label: "مسودة غير مرسلة", tone: "neutral", payable: false, pending: false }
+  { value: "ordered", label: "تم الطلب من المورد", compactLabel: "تم الطلب", tone: "info", payable: true, pending: true },
+  { value: "fabrication", label: "قيد التصنيع", compactLabel: "قيد التصنيع", tone: "warning", payable: true, pending: true },
+  { value: "ready", label: "جاهز للاستلام", compactLabel: "جاهز", tone: "success", payable: true, pending: true },
+  { value: "partial", label: "استلام جزئي", compactLabel: "استلام جزئي", tone: "warning", payable: true, pending: true },
+  { value: "collected", label: "تم الاستلام", compactLabel: "تم الاستلام", tone: "done", payable: true, pending: false },
+  { value: "pricing", label: "تسعير فقط", compactLabel: "تسعير", tone: "neutral", payable: false, pending: false },
+  { value: "cancelled", label: "ملغي", compactLabel: "ملغي", tone: "danger", payable: false, pending: false },
+  { value: "draft", label: "مسودة غير مرسلة", compactLabel: "مسودة", tone: "neutral", payable: false, pending: false }
 ];
 
 const ORDER_STATUS_ALIASES = {
@@ -263,52 +273,89 @@ const ORDER_STATUS_ALIASES = {
 };
 
 const THEME_PRESETS = {
-  gold: {
-    name: "ذهبي",
-    icon: Sun,
-    values: {
-      bodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
-      headingFontFamily: "Georgia, Times New Roman, serif",
-      tableBodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
-      tableHeadingFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
-      bodyFontColor: "#f7efe0",
-      headingFontColor: "#ffe29a",
-      tableHeaderBg: "#1b1306",
-      tableHeaderColor: "#fff3c6",
-      tableLineColor: "#b18a36"
-    }
-  },
-  light: {
-    name: "فاتح",
-    icon: Sparkles,
-    values: {
-      bodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
-      headingFontFamily: "Georgia, Times New Roman, serif",
-      tableBodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
-      tableHeadingFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
-      bodyFontColor: "#17202a",
-      headingFontColor: "#7a5315",
-      tableHeaderBg: "#101820",
-      tableHeaderColor: "#fff5d6",
-      tableLineColor: "#d6c08a"
-    }
-  },
-  dark: {
-    name: "داكن",
+  "premium-dark": {
+    name: "داكن فاخر",
     icon: Moon,
     values: {
       bodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
-      headingFontFamily: "Georgia, Times New Roman, serif",
+      headingFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
       tableBodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
       tableHeadingFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
-      bodyFontColor: "#edf3f8",
-      headingFontColor: "#f7d77c",
-      tableHeaderBg: "#06131d",
-      tableHeaderColor: "#f8d886",
-      tableLineColor: "#2f4a5d"
+      bodyFontColor: "#f0f0f2",
+      headingFontColor: "#e5c158",
+      tableHeaderBg: "#18181c",
+      tableHeaderColor: "#f0f0f2",
+      tableLineColor: "#34343b"
+    }
+  },
+  "sakura-light": {
+    name: "ساكورا فاتح",
+    icon: Sparkles,
+    values: {
+      bodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
+      headingFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
+      tableBodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
+      tableHeadingFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
+      bodyFontColor: "#362b30",
+      headingFontColor: "#9c6377",
+      tableHeaderBg: "#9c6377",
+      tableHeaderColor: "#ffffff",
+      tableLineColor: "#d9b8c3"
+    }
+  },
+  "standard-dark": {
+    name: "داكن قياسي",
+    icon: Monitor,
+    values: {
+      bodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
+      headingFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
+      tableBodyFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
+      tableHeadingFontFamily: "Segoe UI, Tahoma, Arial, sans-serif",
+      bodyFontColor: "#e9eaec",
+      headingFontColor: "#f4f5f6",
+      tableHeaderBg: "#1c2025",
+      tableHeaderColor: "#e9eaec",
+      tableLineColor: "#3d4249"
     }
   }
 };
+
+const LEGACY_THEME_ALIASES = {
+  gold: "premium-dark",
+  light: "sakura-light",
+  dark: "standard-dark",
+  "sakura-dark": "standard-dark"
+};
+
+function normalizeThemeName(theme) {
+  const candidate = LEGACY_THEME_ALIASES[theme] || theme;
+  return THEME_PRESETS[candidate] ? candidate : "premium-dark";
+}
+
+const LEGACY_PREMIUM_THEME_VALUES = {
+  bodyFontColor: "#f3e5ab",
+  tableHeaderBg: "#15130d",
+  tableHeaderColor: "#f3e5ab",
+  tableLineColor: "#7e6728"
+};
+
+function normalizeThemeAppearance(settings = {}) {
+  const sourceTheme = settings?.theme;
+  const theme = normalizeThemeName(sourceTheme);
+  const normalized = { ...settings, theme };
+
+  // v0.1.13 retires the pink dark preset. Replace only known preset values so
+  // deliberately customized Premium Dark appearance settings remain intact.
+  if (sourceTheme === "sakura-dark" || sourceTheme === "dark") {
+    return { ...normalized, ...THEME_PRESETS[theme].values };
+  }
+  if (theme === "premium-dark") {
+    for (const [key, legacyValue] of Object.entries(LEGACY_PREMIUM_THEME_VALUES)) {
+      if (normalized[key] === legacyValue) normalized[key] = THEME_PRESETS[theme].values[key];
+    }
+  }
+  return normalized;
+}
 
 const DEFAULT_REPORT_PALETTE = {
   reportPageBackground: "#ffffff",
@@ -324,10 +371,10 @@ const DEFAULT_REPORT_PALETTE = {
 };
 
 const DEFAULT_APPEARANCE = {
-  theme: "gold",
+  theme: "premium-dark",
   reportLogoDataUrl: "",
   ...DEFAULT_REPORT_PALETTE,
-  ...THEME_PRESETS.gold.values
+  ...THEME_PRESETS["premium-dark"].values
 };
 
 const APPEARANCE_STORAGE_KEY = "glassOrdersAppearance";
@@ -1098,6 +1145,11 @@ function statusLabel(value) {
   return orderStatusDef(value).label;
 }
 
+function compactStatusLabel(value) {
+  const status = orderStatusDef(value);
+  return status.compactLabel || status.label;
+}
+
 function statusClassName(value) {
   return `status-chip ${orderStatusDef(value).tone}`;
 }
@@ -1117,10 +1169,11 @@ function appearanceStorageKey(user = null) {
 
 function mergeAppearanceSettings(globalSettings = {}, localSettings = {}) {
   const merged = { ...DEFAULT_APPEARANCE, ...globalSettings, ...localSettings };
+  const normalized = normalizeThemeAppearance(merged);
   if (!cleanName(localSettings.reportLogoDataUrl) && cleanName(globalSettings.reportLogoDataUrl)) {
-    merged.reportLogoDataUrl = globalSettings.reportLogoDataUrl;
+    normalized.reportLogoDataUrl = globalSettings.reportLogoDataUrl;
   }
-  return normalizeReportPalette(merged);
+  return normalizeReportPalette(normalized);
 }
 
 function readAppearanceSettings(user = null) {
@@ -1240,9 +1293,9 @@ async function persistGlobalAppearancePatch(patchValue = {}) {
 
 function applyAppearanceSettings(settings = DEFAULT_APPEARANCE) {
   const root = document.documentElement;
-  const merged = { ...DEFAULT_APPEARANCE, ...settings };
+  const merged = normalizeThemeAppearance({ ...DEFAULT_APPEARANCE, ...settings });
   const report = normalizeReportPalette(merged);
-  root.dataset.theme = merged.theme || "gold";
+  root.dataset.theme = merged.theme;
   root.style.setProperty("--app-font", merged.bodyFontFamily);
   root.style.setProperty("--heading-font", merged.headingFontFamily);
   root.style.setProperty("--table-font", merged.tableBodyFontFamily);
@@ -1265,8 +1318,9 @@ function applyAppearanceSettings(settings = DEFAULT_APPEARANCE) {
 }
 
 function appearanceWithTheme(theme, current = DEFAULT_APPEARANCE) {
-  const preset = THEME_PRESETS[theme] || THEME_PRESETS.gold;
-  return { ...current, theme, ...preset.values };
+  const resolvedTheme = normalizeThemeName(theme);
+  const preset = THEME_PRESETS[resolvedTheme];
+  return { ...current, theme: resolvedTheme, ...preset.values };
 }
 
 function latestTimestamp(order) {
@@ -3007,7 +3061,7 @@ function orderReportLineItems(row = {}, index = 0) {
 }
 
 function orderTotals(order) {
-  return activeOrderRows(order.rows || []).reduce(
+  const calculated = activeOrderRows(order.rows || []).reduce(
     (sum, row) => {
       const totals = rowTotals(row);
       sum.area += totals.area;
@@ -3018,6 +3072,14 @@ function orderTotals(order) {
     },
     { area: 0, pieces: 0, total: 0, supplierCost: 0 }
   );
+  const lumpSum = supplierLumpSumCost(order);
+  return {
+    ...calculated,
+    calculatedSupplierCost: calculated.supplierCost,
+    supplierLumpSumCost: lumpSum,
+    supplierCost: effectiveSupplierCost(order, calculated.supplierCost),
+    supplierCostSource: supplierCostSource(order)
+  };
 }
 
 function money(value) {
@@ -3052,6 +3114,9 @@ function createDraft(overrides = {}) {
     customerName: overrides.customerName || "",
     supplierId: overrides.supplierId || overrides.supplier_id || "",
     supplierName: overrides.supplierName || "",
+    supplierLumpSumCost: Object.prototype.hasOwnProperty.call(overrides, "supplierLumpSumCost")
+      ? overrides.supplierLumpSumCost
+      : (Object.prototype.hasOwnProperty.call(overrides, "supplier_lump_sum_cost") ? overrides.supplier_lump_sum_cost : null),
     project: overrides.project || "",
     code: overrides.code || "",
     notes: overrides.notes || "",
@@ -3088,6 +3153,9 @@ function plainClone(value) {
 
 function orderSaveSnapshot(order = {}) {
   const cloned = plainClone(order);
+  const supplierLumpSumCostValue = Object.prototype.hasOwnProperty.call(cloned, "supplierLumpSumCost")
+    ? cloned.supplierLumpSumCost
+    : (Object.prototype.hasOwnProperty.call(cloned, "supplier_lump_sum_cost") ? cloned.supplier_lump_sum_cost : null);
   return {
     ...cloned,
     id: cleanName(cloned.id),
@@ -3103,6 +3171,7 @@ function orderSaveSnapshot(order = {}) {
     customerName: cleanName(cloned.customerName),
     supplierId: cleanName(cloned.supplierId || cloned.supplier_id),
     supplierName: cleanName(cloned.supplierName),
+    supplierLumpSumCost: supplierLumpSumCostValue,
     project: cleanName(cloned.project),
     code: cleanName(cloned.code),
     notes: cloned.notes || "",
@@ -3615,8 +3684,23 @@ function dataWithoutSupplierCosts(data = {}) {
       ...order,
       supplierCost: 0,
       supplier_cost: 0,
+      supplierLumpSumCost: null,
+      supplier_lump_sum_cost: null,
       totals: order.totals && typeof order.totals === "object"
-        ? { ...order.totals, supplierCost: 0, supplier_cost: 0 }
+        ? (() => {
+            const {
+              supplierCost: _supplierCost,
+              supplier_cost: _supplierCostSnake,
+              calculatedSupplierCost: _calculatedSupplierCost,
+              calculated_supplier_cost: _calculatedSupplierCostSnake,
+              supplierLumpSumCost: _supplierLumpSumCost,
+              supplier_lump_sum_cost: _supplierLumpSumCostSnake,
+              supplierCostSource: _supplierCostSource,
+              supplier_cost_source: _supplierCostSourceSnake,
+              ...safeTotals
+            } = order.totals;
+            return { ...safeTotals, supplierCost: 0, supplier_cost: 0 };
+          })()
         : order.totals,
       rows: (order.rows || []).map((row) => ({
         ...row,
@@ -4113,6 +4197,7 @@ async function loadData() {
             customerName: order.customer_name,
             supplierId: order.supplier_id || "",
             supplierName: order.supplier_name,
+            supplierLumpSumCost: order.supplier_lump_sum_cost,
             project: order.project,
             code: order.code,
             notes: order.notes,
@@ -4156,7 +4241,20 @@ async function saveOrderToStore(order, data) {
   if (!validation.isValid) {
     throw new Error(validation.errors[0]?.message || "تعذر حفظ الطلب لوجود بيانات مطلوبة غير مكتملة.");
   }
-  const normalized = { ...orderSaveSnapshot({ ...order, rows: validation.payloadRows }), expectedItemCount: validation.payloadRows.length, status: normalizeOrderStatus(order.status), collectedPieces: databaseNumber(order.collectedPieces, 0), customerName: cleanName(order.customerName), supplierName: cleanName(order.supplierName) };
+  const lumpSumState = supplierLumpSumCostState(order.supplierLumpSumCost ?? order.supplier_lump_sum_cost);
+  if (!lumpSumState.valid) {
+    throw new Error("قيمة فاتورة المورد يجب أن تكون رقماً صفراً أو أكبر.");
+  }
+  const normalized = {
+    ...orderSaveSnapshot({ ...order, rows: validation.payloadRows }),
+    supplierLumpSumCost: lumpSumState.value,
+    _canViewCosts: order._canViewCosts !== false,
+    expectedItemCount: validation.payloadRows.length,
+    status: normalizeOrderStatus(order.status),
+    collectedPieces: databaseNumber(order.collectedPieces, 0),
+    customerName: cleanName(order.customerName),
+    supplierName: cleanName(order.supplierName)
+  };
   if (order._existingOrder === true) normalized._existingOrder = true;
   if (localServerEnabled()) {
     try {
@@ -4484,7 +4582,10 @@ async function saveOrderToSupabase(client, normalized) {
       expected_item_count: rows.length,
       app_version: VERSION,
       client_type: Capacitor.getPlatform(),
-      totals: orderTotals(normalized)
+      totals: orderTotals(normalized),
+      ...(normalized._canViewCosts !== false
+        ? { supplier_lump_sum_cost: normalized.supplierLumpSumCost }
+        : {})
     };
     // Header save, row updates/inserts, and removed-row pruning must either all
     // commit or all roll back. This path is also used by persisted Undo restore.
@@ -4782,6 +4883,7 @@ function App() {
   const [draftSavedMarker, setDraftSavedMarker] = useState("");
   const [preview, setPreview] = useState(null);
   const [supplierPayment, setSupplierPayment] = useState(null);
+  const [supplierCostEditOrder, setSupplierCostEditOrder] = useState(null);
   const [deleteOrderTarget, setDeleteOrderTarget] = useState(null);
   const [deleteOrderBusy, setDeleteOrderBusy] = useState(false);
   const [localStatus, setLocalStatus] = useState(null);
@@ -5546,6 +5648,12 @@ function App() {
           setActiveTab("entry");
           return null;
         }
+        const lumpSumState = supplierLumpSumCostState(sourceDraft.supplierLumpSumCost);
+        if (!lumpSumState.valid) {
+          setMessage("قيمة فاتورة المورد يجب أن تكون رقماً صفراً أو أكبر.");
+          setActiveTab("entry");
+          return null;
+        }
         let snapshot = orderSaveSnapshot({ ...sourceDraft, rows: validation.payloadRows });
         let loadedOrderForId = snapshot.id
           ? data.orders.find((order) => order.id === snapshot.id)
@@ -5572,9 +5680,18 @@ function App() {
           ? loadedOrderForId.id
           : (snapshot.id || snapshot.clientDocumentId || uid());
         const orderForSave = saveAsExisting
-          ? { ...snapshot, id: loadedOrderForId.id, orderNo: loadedOrderForId.orderNo || snapshot.orderNo, _existingOrder: true }
+          ? {
+              ...snapshot,
+              supplierLumpSumCost: lumpSumState.value,
+              _canViewCosts: canCurrentUserViewCosts(currentUser),
+              id: loadedOrderForId.id,
+              orderNo: loadedOrderForId.orderNo || snapshot.orderNo,
+              _existingOrder: true
+            }
           : {
               ...snapshot,
+              supplierLumpSumCost: lumpSumState.value,
+              _canViewCosts: canCurrentUserViewCosts(currentUser),
               _existingOrder: false,
               id: persistentOrderId,
               clientDocumentId: snapshot.clientDocumentId || persistentOrderId,
@@ -5930,6 +6047,53 @@ function App() {
     }
   }
 
+  async function updateSupplierLumpSumCost(order, rawValue) {
+    if (savePromiseRef.current || saveInFlightRef.current) {
+      setMessage("يوجد حفظ جارٍ بالفعل. انتظر حتى يكتمل ثم أعد المحاولة.");
+      return null;
+    }
+    const state = supplierLumpSumCostState(rawValue);
+    if (!state.valid) {
+      setMessage("قيمة فاتورة المورد يجب أن تكون رقماً صفراً أو أكبر.");
+      return null;
+    }
+    const run = (async () => {
+      saveInFlightRef.current = true;
+      setLoading(true);
+      try {
+        const latestData = appStateRef.current?.data || data;
+        const currentOrder = findMatchingOrder(latestData.orders, order) || order;
+        const next = await saveOrderToStore({
+          ...currentOrder,
+          supplierLumpSumCost: state.value,
+          _canViewCosts: true,
+          _existingOrder: true
+        }, latestData);
+        replaceAppData(next);
+        const saved = findMatchingOrder(next.orders, currentOrder) || currentOrder;
+        const latestDraft = appStateRef.current?.draft || draft;
+        if (sameOrderIdentity(latestDraft, currentOrder)) {
+          const savedDraft = createDraft(saved);
+          replaceDraftState(savedDraft, JSON.stringify(savedDraft));
+        }
+        setPendingSyncCount(readOfflineQueue().length);
+        setMessage(state.empty
+          ? `تمت العودة إلى احتساب إجمالي بنود الطلب في ${displayOrderNo(saved.orderNo)}.`
+          : `تم اعتماد فاتورة المورد للطلب ${displayOrderNo(saved.orderNo)}.`);
+        return saved;
+      } catch (error) {
+        setMessage(`تعذر حفظ فاتورة المورد: ${friendlySaveError(error)}`);
+        return null;
+      } finally {
+        saveInFlightRef.current = false;
+        savePromiseRef.current = null;
+        setLoading(false);
+      }
+    })();
+    savePromiseRef.current = run;
+    return run;
+  }
+
   async function confirmDeleteOrder(order) {
     if (!order || deleteOrderBusy) return;
     if (appHistoryRef.current.busy) {
@@ -6169,6 +6333,7 @@ function App() {
             projectOptions={projectOptions}
             priceHistory={priceHistory}
             totals={totals}
+            canViewCosts={canCurrentUserViewCosts(currentUser)}
             saving={loading}
             onSave={(validatedDraft) => saveDraft({ returnToOrigin: true, draftOverride: validatedDraft })}
             onPreview={previewDraftOrder}
@@ -6190,6 +6355,7 @@ function App() {
             logoSrc={reportLogoSrc}
             onOpen={openOrder}
             onUpdateOrder={updateOrderStatus}
+            onEditSupplierCost={(order) => setSupplierCostEditOrder(order)}
             onDeleteOrder={(order, trigger) => {
               if (deleteOrderBusy) return;
               const row = trigger?.closest?.(".status-row");
@@ -6230,6 +6396,8 @@ function App() {
             onExportExcel={exportSupplierExcel}
             onOpen={openOrder}
             canEditOrder={(order) => canCurrentUserEditOrder(currentUser, order)}
+            canViewCosts={canCurrentUserViewCosts(currentUser)}
+            onEditSupplierCost={(order) => setSupplierCostEditOrder(order)}
           />
         )}
         {activeTab === "manufacturing" && (
@@ -6262,6 +6430,14 @@ function App() {
         />
       )}
       {supplierPayment && <PaymentModal supplier={supplierPayment} onClose={closeSupplierPayment} onSave={addSupplierPayment} />}
+      {supplierCostEditOrder && (
+        <SupplierLumpSumCostModal
+          order={supplierCostEditOrder}
+          busy={loading}
+          onClose={() => setSupplierCostEditOrder(null)}
+          onSave={updateSupplierLumpSumCost}
+        />
+      )}
       {deleteOrderTarget && <DeleteOrderModal order={deleteOrderTarget} busy={deleteOrderBusy} onClose={closeDeleteOrderModal} onConfirm={confirmDeleteOrder} />}
       {passwordRecoveryOpen && <PasswordRecoveryModal busy={loading} onSave={completePasswordRecovery} onClose={closePasswordRecovery} />}
     </main>
@@ -6324,7 +6500,7 @@ function DeleteOrderModal({ order, busy, onClose, onConfirm }) {
           <span>العميل</span>
           <strong>{order.customerName || "بدون عميل"}</strong>
         </div>
-        <p>سيتم حذف الطلب وكل صفوفه ورسوماته من قاعدة البيانات. لا تستخدم هذا الزر إلا عند الحاجة المؤكدة.</p>
+        <p>سيتم حذف الطلب وكل بنوده ورسوماته من قاعدة البيانات. لا تستخدم هذا الزر إلا عند الحاجة المؤكدة.</p>
         <label className="hard-delete-input">
           <span>اكتب كلمة حذف للتأكيد</span>
           <input autoFocus value={confirmation} onChange={(event) => setConfirmation(event.target.value)} placeholder="حذف" />
@@ -6687,7 +6863,7 @@ function storedTableWidths(key, definitions) {
   }
 }
 
-function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smartOptions, projectOptions, priceHistory, totals, saving = false, onSave, onPreview, onExportPdf, onExportExcel, onCancel, notify, onLearnTableOption = () => {}, recordHistory = () => {}, onUndo = () => {}, onRedo = () => {}, historyStatus = {} }) {
+function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smartOptions, projectOptions, priceHistory, totals, canViewCosts = false, saving = false, onSave, onPreview, onExportPdf, onExportExcel, onCancel, notify, onLearnTableOption = () => {}, recordHistory = () => {}, onUndo = () => {}, onRedo = () => {}, historyStatus = {} }) {
   const [tableFullScreen, setTableFullScreen] = useState(false);
   const [deleteRowIndexes, setDeleteRowIndexes] = useState(null);
   const [invalidRowIndex, setInvalidRowIndex] = useState(null);
@@ -6812,6 +6988,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
       window.removeEventListener("pointerup", stop, true);
       window.removeEventListener("pointercancel", stop, true);
       window.removeEventListener("blur", stop, true);
+      target?.removeEventListener?.("lostpointercapture", stop, true);
       if (bodyClass) document.body.classList.remove(bodyClass);
       try {
         if (target?.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId);
@@ -6828,6 +7005,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     window.addEventListener("pointerup", stop, true);
     window.addEventListener("pointercancel", stop, true);
     window.addEventListener("blur", stop, true);
+    target?.addEventListener?.("lostpointercapture", stop, true);
     pointerGestureCleanupRef.current.add(cleanup);
     return cleanup;
   }
@@ -7134,6 +7312,7 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     if (sameTableCell(editingCell, nextCell)) {
       const key = cellDraftKey(rowIndex, column, nextCell.rowId);
       setCellDraftValues((current) => ({ ...current, [key]: value }));
+      if (/^layer\d+-thickness$/.test(column)) return;
     }
     setCellValue(rowIndex, column, value, {
       label: options.label || "تعديل خلية",
@@ -8247,6 +8426,10 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     return !currentRowErrors.includes(validationErrorKey({ ...error, rowId: row.id || error.rowId }));
   }
   const unresolvedValidationErrors = validationErrors.filter((error) => !isValidationErrorResolved(error));
+  const orderReadiness = useMemo(
+    () => buildOrderReadinessChecklist(draft, { customers, suppliers }),
+    [draft, customers, suppliers]
+  );
   const validationKeys = new Set(unresolvedValidationErrors.map(validationErrorKey));
   const invalidRowIds = new Set(unresolvedValidationErrors.filter((error) => error.scope === "row").map((error) => error.rowId));
   const isValidationCellInvalid = (rowIndex, column) => {
@@ -8279,6 +8462,18 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
             })}</ul>
           </div>
         )}
+        <section className="order-readiness" aria-live="polite">
+          <strong>{orderReadiness.ready ? "الطلب جاهز للحفظ" : `استكمال البيانات ${orderReadiness.completeCount}/${orderReadiness.items.length}`}</strong>
+          <div className="order-readiness-list">
+            {orderReadiness.items.map((item) => (
+              <span className={`order-readiness-item ${item.complete ? "complete" : "incomplete"}`} key={item.id}>
+                {item.complete ? <CheckCircle2 size={14} /> : <Circle size={14} />}
+                {item.label}
+              </span>
+            ))}
+          </div>
+          {!orderReadiness.ready && orderReadiness.issues[0] && <p className="order-readiness-issues">{orderReadiness.issues[0]}</p>}
+        </section>
         <div className="form-grid">
           <Field label="رقم الطلب الداخلي"><input className="generated-id" dir="ltr" value={displayOrderNo(draft.orderNo)} readOnly title="رقم تلقائي لا يتكرر" /></Field>
           <Field label="التاريخ" fieldKey="date" invalid={validationKeys.has("order:date")}><input type="date" dir="ltr" value={draft.date} aria-invalid={validationKeys.has("order:date")} onChange={(e) => patch({ date: e.target.value })} /></Field>
@@ -8340,6 +8535,13 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
             </button>}
           </div>
         </div>
+        {drawingFocusIndex < 0 && canViewCosts && (
+          <SupplierCostOverrideControl
+            order={draft}
+            totals={totals}
+            onChange={(supplierLumpSumCost) => patch({ supplierLumpSumCost })}
+          />
+        )}
         {drawingFocusIndex >= 0 ? (
           <div className="drawing-focus-shell">
             <DrawingFocusEditor
@@ -8510,6 +8712,44 @@ function RowDeleteModal({ rows = [], indexes = [], onClose, onConfirm }) {
   );
 }
 
+function SupplierCostOverrideControl({ order, totals, onChange }) {
+  const rawValue = order?.supplierLumpSumCost ?? order?.supplier_lump_sum_cost ?? "";
+  const state = supplierLumpSumCostState(rawValue);
+  const overridden = hasSupplierLumpSumCost(order);
+  return (
+    <section className="supplier-cost-override" aria-label="تكلفة فاتورة المورد">
+      <div className="supplier-cost-override-copy">
+        <strong>تكلفة فاتورة المورد</strong>
+        <span className={overridden ? "supplier-cost-source" : "supplier-cost-source calculated"}>
+          {overridden
+            ? `فاتورة المورد معتمدة: ${money(totals.supplierCost)}`
+            : `محسوبة من إجمالي بنود الطلب: ${money(totals.calculatedSupplierCost)}`}
+        </span>
+      </div>
+      <Field label="مبلغ الفاتورة (اختياري)">
+        <input
+          dir="ltr"
+          inputMode="decimal"
+          value={rawValue}
+          aria-invalid={!state.valid}
+          placeholder={money(totals.calculatedSupplierCost)}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </Field>
+      <button
+        type="button"
+        className="icon-button"
+        title="استخدام إجمالي بنود الطلب"
+        aria-label="استخدام إجمالي بنود الطلب"
+        disabled={state.empty}
+        onClick={() => onChange("")}
+      >
+        <XCircle size={18} />
+      </button>
+    </section>
+  );
+}
+
 function OrderTotalsPanel({ totals, floating = false }) {
   return (
     <details className={floating ? "totals-panel floating" : "totals-panel"} open={!floating}>
@@ -8518,7 +8758,12 @@ function OrderTotalsPanel({ totals, floating = false }) {
         <span>إجمالي القطع <strong>{money(totals.pieces)}</strong></span>
         <span>إجمالي المساحة <strong>{square(totals.area)} م2</strong></span>
         <span>إجمالي الفاتورة <strong>{money(totals.total)}</strong></span>
-        <span>تكلفة المورد <strong>{money(totals.supplierCost)}</strong></span>
+        <span>
+          تكلفة المورد <strong>{money(totals.supplierCost)}</strong>
+          <small className={totals.supplierCostSource === "lump-sum" ? "supplier-cost-source" : "supplier-cost-source calculated"}>
+            {totals.supplierCostSource === "lump-sum" ? "فاتورة المورد" : "إجمالي بنود الطلب"}
+          </small>
+        </span>
       </div>
     </details>
   );
@@ -10951,7 +11196,9 @@ function SuppliersView({
   onExportPdf,
   onExportExcel,
   onOpen,
-  canEditOrder = () => true
+  canEditOrder = () => true,
+  canViewCosts = false,
+  onEditSupplierCost = () => {}
 }) {
   const [viewState, setViewState] = useState(readSupplierViewState);
   const statementPanelRef = useRef(null);
@@ -11162,27 +11409,35 @@ function SuppliersView({
               ))}
             </select>
           </Field>
-          <fieldset className="supplier-statement-mode">
-            <legend>نوع كشف الحساب</legend>
-            <label>
+          <div className="supplier-statement-mode" role="radiogroup" aria-label="نوع كشف الحساب">
+            <span className="supplier-statement-mode-label">نوع كشف الحساب</span>
+            <label className={viewState.statementMode === RANGE_STATEMENT_MODE ? "supplier-statement-mode-option selected" : "supplier-statement-mode-option"}>
               <input
                 type="radio"
                 name="supplier-statement-mode"
                 checked={viewState.statementMode === RANGE_STATEMENT_MODE}
                 onChange={() => changeStatementMode(RANGE_STATEMENT_MODE)}
               />
-              كشف حساب لفترة
+              <CalendarRange size={18} aria-hidden="true" />
+              <span>
+                <strong>كشف حساب لفترة</strong>
+                <small>الحركة والدفعات خلال تاريخين</small>
+              </span>
             </label>
-            <label>
+            <label className={viewState.statementMode === SELECTED_ORDERS_STATEMENT_MODE ? "supplier-statement-mode-option selected" : "supplier-statement-mode-option"}>
               <input
                 type="radio"
                 name="supplier-statement-mode"
                 checked={viewState.statementMode === SELECTED_ORDERS_STATEMENT_MODE}
                 onChange={() => changeStatementMode(SELECTED_ORDERS_STATEMENT_MODE)}
               />
-              كشف حساب لطلبات محددة
+              <ClipboardList size={18} aria-hidden="true" />
+              <span>
+                <strong>طلبات محددة</strong>
+                <small>اختيار أوامر بعينها دون الدفعات</small>
+              </span>
             </label>
-          </fieldset>
+          </div>
         </div>
 
         {viewState.statementMode === RANGE_STATEMENT_MODE ? (
@@ -11271,9 +11526,15 @@ function SuppliersView({
                         <span dir="ltr">{orderDocumentId(order)}</span>
                         <span dir="ltr">{formatStatusDate(order.date)}</span>
                         <span>{order.project || "بدون مشروع"}</span>
-                        <strong>{isOrderPayableForSupplier(order) ? money(totals.supplierCost) : "غير مستحق"}</strong>
+                        <strong className="supplier-order-cost">
+                          <bdi dir="ltr">{isOrderPayableForSupplier(order) ? money(totals.supplierCost) : "غير مستحق"}</bdi>
+                          {isOrderPayableForSupplier(order) && <small className={totals.supplierCostSource === "lump-sum" ? "supplier-cost-source" : "supplier-cost-source calculated"}>{totals.supplierCostSource === "lump-sum" ? "فاتورة المورد" : "إجمالي بنود الطلب"}</small>}
+                        </strong>
                         <span className={statusClassName(order.status)}>{statusLabel(order.status)}</span>
-                        {canEditOrder(order) && <button className="tiny" type="button" title="تعديل الطلب" onClick={() => onOpen?.(order)}><Pencil size={14} />تعديل</button>}
+                        <div className="supplier-row-actions">
+                          {canViewCosts && canEditOrder(order) && <button className="tiny icon-button" type="button" title="تعديل فاتورة المورد" aria-label="تعديل فاتورة المورد" onClick={() => onEditSupplierCost(order)}><BadgeDollarSign size={15} /></button>}
+                          {canEditOrder(order) && <button className="tiny icon-button" type="button" title="تعديل الطلب" aria-label="تعديل الطلب" onClick={() => onOpen?.(order)}><Pencil size={15} /></button>}
+                        </div>
                       </div>
                     );
                   })}
@@ -12222,7 +12483,7 @@ function formatReceiptHistoryTime(value) {
   return Number.isNaN(date.getTime()) ? String(value || "-") : date.toLocaleString("ar-EG");
 }
 
-function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, onDeleteOrder, onPreview }) {
+function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, onEditSupplierCost = () => {}, onDeleteOrder, onPreview }) {
   const initialUiState = useMemo(readOrdersStatusUiState, []);
   const supplierNames = useMemo(() => uniqueValues([...data.suppliers.map((supplier) => supplier.name), ...data.orders.map((order) => order.supplierName || "بدون مورد")]), [data]);
   const statusScrollRef = useRef(null);
@@ -12487,8 +12748,8 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
                   <span>{order.customerName || "بدون عميل"} / {order.project || "بدون مشروع"}</span>
                   <GlassTypeBreakdown order={order} />
                   <span className="status-date" dir="ltr">{formatStatusDate(order.date)}</span>
-                  <select value={status} onChange={(event) => changeWorkflowStatus(order, event.target.value)}>
-                    {ORDER_STATUS_DEFS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                  <select value={status} aria-label={`حالة ${displayOrderNo(order.orderNo)}`} onChange={(event) => changeWorkflowStatus(order, event.target.value)}>
+                    {ORDER_STATUS_DEFS.map((item) => <option key={item.value} value={item.value}>{compactStatusLabel(item.value)}</option>)}
                   </select>
                   <div className="collection-control">
                     {glassGroups.length > 1 ? (
@@ -12517,10 +12778,16 @@ function OrdersStatusView({ data, currentUser, logoSrc, onOpen, onUpdateOrder, o
                     <label><input type="checkbox" checked={status === "pricing"} onChange={(event) => setSpecialStatus(order, event.target.checked, "pricing")} />تسعير فقط</label>
                     <label><input type="checkbox" checked={status === "cancelled"} onChange={(event) => setSpecialStatus(order, event.target.checked, "cancelled")} />ملغي</label>
                   </div>
-                  {costsVisible && <span className={isOrderPayableForSupplier(order) ? "payable yes" : "payable no"}>{isOrderPayableForSupplier(order) ? money(totals.supplierCost) : "غير مستحق"}</span>}
+                  {costsVisible && (
+                    <span className={isOrderPayableForSupplier(order) ? "payable yes" : "payable no"}>
+                      {isOrderPayableForSupplier(order) ? money(totals.supplierCost) : "غير مستحق"}
+                      {isOrderPayableForSupplier(order) && <small className={totals.supplierCostSource === "lump-sum" ? "supplier-cost-source" : "supplier-cost-source calculated"}>{totals.supplierCostSource === "lump-sum" ? "فاتورة المورد" : "إجمالي بنود الطلب"}</small>}
+                    </span>
+                  )}
                   <div className="status-actions">
-                    {canCurrentUserEditOrder(currentUser, order) && <button className="tiny" title="تعديل الطلب" onClick={() => openOrderEditor(order)}><Pencil size={14} />تعديل الطلب</button>}
-                    <button className="tiny danger solid-danger" onClick={(event) => onDeleteOrder(order, event.currentTarget)}><Trash2 size={14} />حذف</button>
+                    {canViewCosts && canCurrentUserEditOrder(currentUser, order) && <button className="tiny icon-button" title="تعديل فاتورة المورد" aria-label="تعديل فاتورة المورد" onClick={() => onEditSupplierCost(order)}><BadgeDollarSign size={15} /></button>}
+                    {canCurrentUserEditOrder(currentUser, order) && <button className="tiny icon-button" title="تعديل الطلب" aria-label="تعديل الطلب" onClick={() => openOrderEditor(order)}><Pencil size={15} /></button>}
+                    <button className="tiny icon-button danger solid-danger" title="حذف الطلب" aria-label="حذف الطلب" onClick={(event) => onDeleteOrder(order, event.currentTarget)}><Trash2 size={15} /></button>
                   </div>
                 </div>
               );
@@ -12690,7 +12957,7 @@ function WorkflowStatusConfirmationDialog({ order, nextStatus, remainingQuantity
         <div className="workflow-status-warning">
           <strong>الحالة الجديدة: {statusLabel(nextStatus)}</strong>
           <span>ما زال هناك {money(remainingQuantity)} من الكمية المطلوبة لم يُسجل استلامها.</span>
-          <p>سيتم تغيير حالة الطلب فقط، ولن تتغير كميات الاستلام أو صفوف الطلب.</p>
+          <p>سيتم تغيير حالة الطلب فقط، ولن تتغير كميات الاستلام أو بنود الطلب.</p>
         </div>
         {error && <div className="receipt-dialog-errors" role="alert"><p>{error}</p></div>}
         <div className="receipt-dialog-actions">
@@ -13244,6 +13511,57 @@ function PaymentModal({ supplier, onClose, onSave }) {
         <Field label="الطريقة"><input value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })} /></Field>
         <Field label="ملاحظات"><textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
         <button className="primary" onClick={() => onSave(form)}><Save size={18} />{existing.id ? "حفظ التعديل" : "حفظ الدفعة"}</button>
+      </div>
+    </div>
+  );
+}
+
+function SupplierLumpSumCostModal({ order, busy = false, onClose, onSave }) {
+  const [value, setValue] = useState(order?.supplierLumpSumCost ?? order?.supplier_lump_sum_cost ?? "");
+  const state = supplierLumpSumCostState(value);
+  const totals = orderTotals(order || {});
+
+  useEffect(() => {
+    setValue(order?.supplierLumpSumCost ?? order?.supplier_lump_sum_cost ?? "");
+  }, [order?.id, order?.orderNo, order?.supplierLumpSumCost, order?.supplier_lump_sum_cost]);
+
+  async function submit() {
+    if (!state.valid || busy) return;
+    const saved = await onSave(order, value);
+    if (saved) onClose();
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <div className="modal supplier-lump-sum-modal">
+        <div className="panel-head">
+          <div>
+            <h2>فاتورة المورد</h2>
+            <p dir="ltr">{displayOrderNo(order?.orderNo)}</p>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy}><XCircle size={18} />إغلاق</button>
+        </div>
+        <p className="hint">عند ترك القيمة فارغة سيعود الطلب إلى إجمالي تكلفة بنود الطلب.</p>
+        <Field label="مبلغ فاتورة المورد">
+          <input
+            autoFocus
+            dir="ltr"
+            inputMode="decimal"
+            value={value}
+            aria-invalid={!state.valid}
+            placeholder={money(totals.calculatedSupplierCost)}
+            onChange={(event) => setValue(event.target.value)}
+          />
+        </Field>
+        {!state.valid && <p className="danger-text">أدخل رقماً صفراً أو أكبر، أو اترك الحقل فارغاً.</p>}
+        <div className="supplier-lump-sum-reference">
+          <span>إجمالي بنود الطلب</span>
+          <strong dir="ltr">{money(totals.calculatedSupplierCost)}</strong>
+        </div>
+        <div className="actions modal-actions">
+          <button type="button" onClick={() => setValue("")} disabled={busy || state.empty}><XCircle size={17} />مسح الفاتورة</button>
+          <button type="button" className="primary" onClick={submit} disabled={busy || !state.valid}><Save size={18} />{busy ? "جار الحفظ..." : "حفظ الفاتورة"}</button>
+        </div>
       </div>
     </div>
   );
@@ -15398,7 +15716,7 @@ function reportPrintDocumentHtml(element, fileName) {
     <html dir="rtl">
       <head>
         <meta charset="utf-8">
-        <meta name="author" content="Y.D Software">
+        <meta name="author" content="Yasser Diab">
         <meta name="subject" content="Glass Purchase Order">
         <meta name="creator" content="${FULL_APP_NAME}">
         <title>${escapeHtml(title)}</title>
@@ -17332,7 +17650,9 @@ function StatusVariantApp() {
   }
 
   function toggleTheme() {
-    const nextTheme = appearance.theme === "dark" ? "light" : "dark";
+    const themes = ["premium-dark", "sakura-light", "standard-dark"];
+    const currentTheme = normalizeThemeName(appearance.theme);
+    const nextTheme = themes[(themes.indexOf(currentTheme) + 1) % themes.length];
     setAppearance(appearanceWithTheme(nextTheme, appearance));
   }
 
@@ -17416,7 +17736,7 @@ function StatusVariantApp() {
       <header className="status-mobile-header">
         <strong>حالة الطلبات</strong>
         <span className={data.source === "supabase" ? "connection-dot online" : "connection-dot"} title={connectionLabel} />
-        <button type="button" className="icon-button" title="تبديل المظهر" onClick={toggleTheme}>{appearance.theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}</button>
+        <button type="button" className="icon-button" title="تبديل المظهر" onClick={toggleTheme}>{normalizeThemeName(appearance.theme) === "sakura-light" ? <Moon size={17} /> : <Sun size={17} />}</button>
         <button type="button" className="icon-button" title="تحديث" disabled={loading} onClick={refreshStatusOrders}><RefreshCw size={17} /></button>
         <div className="status-account-menu">
           <button type="button" className="icon-button" title="الحساب" onClick={() => setAccountOpen((current) => !current)}><LogOut size={17} /></button>

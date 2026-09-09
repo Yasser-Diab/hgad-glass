@@ -50,6 +50,12 @@ const num = (value, fallback = 0) => {
   if (!Number.isFinite(n)) throw new Error("قيمة رقمية غير صالحة. راجع الأرقام المدخلة قبل الحفظ.");
   return n;
 };
+const optionalNonNegativeNumber = (value, label = "القيمة") => {
+  if (value === "" || value === null || value === undefined) return null;
+  const parsed = num(value);
+  if (parsed < 0) throw new Error(`${label} يجب أن تكون صفراً أو أكبر.`);
+  return parsed;
+};
 const parseJson = (value, fallback) => {
   if (value && typeof value === "object") return value;
   try {
@@ -443,11 +449,11 @@ async function migrate() {
     create table if not exists customers (id text primary key, name text not null unique, phone text, email text, address text, tax_no text, notes text, created_at text not null default current_timestamp);
     create table if not exists suppliers (id text primary key, name text not null unique, phone text, email text, address text, notes text, opening_balance real not null default 0, created_at text not null default current_timestamp);
     create table if not exists supplier_payments (id text primary key, supplier_id text, supplier_name text, paid_at text not null, amount real not null default 0, method text, notes text, created_at text not null default current_timestamp);
-    create table if not exists glass_orders (id text primary key, order_no text not null unique, document_id text, order_date text not null, entry_at text, status text not null default 'draft', entry_mode text not null default 'normal', collected_pieces real not null default 0, customer_id text, supplier_id text, customer_name text, supplier_name text, project text, code text, notes text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
+    create table if not exists glass_orders (id text primary key, order_no text not null unique, document_id text, order_date text not null, entry_at text, status text not null default 'draft', entry_mode text not null default 'normal', collected_pieces real not null default 0, customer_id text, supplier_id text, customer_name text, supplier_name text, supplier_lump_sum_cost real, project text, code text, notes text, created_at text not null default current_timestamp, updated_at text not null default current_timestamp);
     create table if not exists glass_order_rows (id text primary key, order_id text not null, line_no integer not null default 1, glass_mode text not null default 'single', code text, quantity real not null default 1, unit_price real not null default 0, supplier_unit_price real not null default 0, material_unit_price real not null default 0, supplier_material_unit_price real not null default 0, double_gap text, triplex_pvb text, extra_direction text, notes text, received_quantity real, receipt_history text not null default '[]', layers text not null, drawing text not null, area_m2 real not null default 0, cost real not null default 0, supplier_cost real not null default 0, created_at text not null default current_timestamp);
     create table if not exists learned_options (id text primary key, kind text not null, value text not null, unique(kind, value));
-    create table if not exists order_revisions (id text primary key, order_id text not null, revision_number integer not null, snapshot jsonb not null, changed_by text, change_type text not null, app_version text not null default '0.1.12', client_type text not null default 'local-server', created_at text not null default current_timestamp, unique(order_id, revision_number));
-    create table if not exists order_row_audit (id text primary key, order_id text not null, row_id text not null, action text not null, previous_value jsonb, new_value jsonb, changed_by text, app_version text not null default '0.1.12', client_type text not null default 'local-server', created_at text not null default current_timestamp);
+    create table if not exists order_revisions (id text primary key, order_id text not null, revision_number integer not null, snapshot jsonb not null, changed_by text, change_type text not null, app_version text not null default '0.1.13', client_type text not null default 'local-server', created_at text not null default current_timestamp, unique(order_id, revision_number));
+    create table if not exists order_row_audit (id text primary key, order_id text not null, row_id text not null, action text not null, previous_value jsonb, new_value jsonb, changed_by text, app_version text not null default '0.1.13', client_type text not null default 'local-server', created_at text not null default current_timestamp);
     create table if not exists order_item_recovery_staging (recovery_id text primary key, order_id text, order_number text, source_type text not null, source_reference text, line_number integer, recovered_payload jsonb not null, reviewed boolean not null default false, applied boolean not null default false, created_at text not null default current_timestamp);
     alter table glass_order_rows add column if not exists material_unit_price real not null default 0;
     alter table glass_order_rows add column if not exists supplier_material_unit_price real not null default 0;
@@ -459,6 +465,7 @@ async function migrate() {
     alter table glass_orders add column if not exists collected_pieces real not null default 0;
     alter table glass_orders add column if not exists customer_id text;
     alter table glass_orders add column if not exists supplier_id text;
+    alter table glass_orders add column if not exists supplier_lump_sum_cost real;
     alter table users add column if not exists email text;
     alter table users add column if not exists auth_user_id text;
     alter table users add column if not exists can_view_costs boolean not null default false;
@@ -480,7 +487,7 @@ async function captureLocalOrderRevision(orderId, changeType, changedBy = null) 
   const revisionNumber = Number(revisionResult.rows[0]?.next_revision || 1);
   await db.query(
     `insert into order_revisions (id, order_id, revision_number, snapshot, changed_by, change_type, app_version, client_type)
-     values ($1,$2,$3,$4::jsonb,$5,$6,'0.1.12','local-server')`,
+     values ($1,$2,$3,$4::jsonb,$5,$6,'0.1.13','local-server')`,
     [gid("rev"), orderId, revisionNumber, JSON.stringify({ order, rows: rowsResult.rows }), changedBy, changeType]
   );
   return revisionNumber;
@@ -490,7 +497,7 @@ async function auditLocalOrderRow(orderId, rowId, action, previousValue, newValu
   if (previousValue && newValue && JSON.stringify(previousValue) === JSON.stringify(newValue)) return;
   await db.query(
     `insert into order_row_audit (id, order_id, row_id, action, previous_value, new_value, changed_by, app_version, client_type)
-     values ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,'0.1.12','local-server')`,
+     values ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,'0.1.13','local-server')`,
     [
       gid("audit"),
       orderId,
@@ -574,6 +581,7 @@ async function bootstrap({ canViewCosts = true } = {}) {
       customerName: order.customer_name || "",
       supplierId: order.supplier_id || "",
       supplierName: order.supplier_name || "",
+      supplierLumpSumCost: canViewCosts ? order.supplier_lump_sum_cost : null,
       project: order.project || "",
       code: order.code || "",
       notes: order.notes || "",
@@ -618,6 +626,7 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
   let customerId = clean(order.customerId);
   let supplierId = clean(order.supplierId);
   const entryAt = order.entryAt === "" ? null : (order.entryAt || new Date().toISOString());
+  let supplierLumpSumCost = optionalNonNegativeNumber(order.supplierLumpSumCost ?? order.supplier_lump_sum_cost, "فاتورة المورد");
   const status = normalizeOrderStatus(order.status);
   const saveAsExisting = order._existingOrder === true;
   const managesTransaction = options.externalTransaction !== true;
@@ -676,6 +685,11 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
           "select id, supplier_unit_price, supplier_material_unit_price, supplier_cost, layers from glass_order_rows where order_id = $1 for update",
           [savedId]
         );
+        const storedOrder = await db.query(
+          "select supplier_lump_sum_cost from glass_orders where id = $1 for update",
+          [savedId]
+        );
+        supplierLumpSumCost = storedOrder.rows[0]?.supplier_lump_sum_cost ?? null;
         const protectedRows = mergeProtectedLocalOrderRows(rowsForSave, storedRows.rows);
         rowsForSave = protectedRows.rows;
         protectedSupplierCosts = protectedRows.protectedSupplierCosts;
@@ -720,18 +734,19 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
         supplierName,
         order.project || "",
         order.code || "",
-        order.notes || ""
+        order.notes || "",
+        supplierLumpSumCost
       ];
       if (savedId) {
         await db.query(
-          `update glass_orders set order_no=$1, document_id=$2, order_date=$3, entry_at=coalesce(entry_at, $4), status=$5, entry_mode=$6, collected_pieces=$7, customer_id=$8, supplier_id=$9, customer_name=$10, supplier_name=$11, project=$12, code=$13, notes=$14, updated_at=current_timestamp where id=$15`,
+          `update glass_orders set order_no=$1, document_id=$2, order_date=$3, entry_at=coalesce(entry_at, $4), status=$5, entry_mode=$6, collected_pieces=$7, customer_id=$8, supplier_id=$9, customer_name=$10, supplier_name=$11, project=$12, code=$13, notes=$14, supplier_lump_sum_cost=$15, updated_at=current_timestamp where id=$16`,
           [...params, savedId]
         );
       } else {
         const insertId = order.id || gid("ord");
         await db.query(
-          `insert into glass_orders (id, order_no, document_id, order_date, entry_at, status, entry_mode, collected_pieces, customer_id, supplier_id, customer_name, supplier_name, project, code, notes, updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,current_timestamp)`,
+          `insert into glass_orders (id, order_no, document_id, order_date, entry_at, status, entry_mode, collected_pieces, customer_id, supplier_id, customer_name, supplier_name, project, code, notes, supplier_lump_sum_cost, updated_at)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,current_timestamp)`,
           [insertId, ...params]
         );
         savedId = insertId;
@@ -806,6 +821,7 @@ async function saveOrder(order, shouldBootstrap = true, options = {}) {
       order.orderNo = candidateOrderNo;
       order.id = savedId;
       order.rows = rowsForSave;
+      order.supplierLumpSumCost = supplierLumpSumCost;
       order.originalRowIds = savedRowIds.map(String);
       order.deletedRowIds = [];
       order._persistenceIntegrity = {
@@ -960,7 +976,7 @@ async function deleteOrder(identifier, shouldBootstrap = true, options = {}) {
 }
 
 async function importExcel(filePath = workbookPath) {
-  const workbook = XLSX.readFile(filePath, { cellDates: true });
+  const workbook = XLSX.read(fs.readFileSync(filePath), { type: "buffer", cellDates: true });
   const sheet = workbook.Sheets["الادخال"];
   if (!sheet) throw new Error("لم أجد شيت الادخال داخل ملف الإكسل.");
   const records = XLSX.utils.sheet_to_json(sheet, { defval: "" });

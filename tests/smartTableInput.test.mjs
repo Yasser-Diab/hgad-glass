@@ -139,8 +139,18 @@ test("thickness cell editing preserves raw typed text until commit", () => {
   assert.match(entrySource, /function cellDraftKey\(rowIndex, column/);
   assert.match(entrySource, /Object\.prototype\.hasOwnProperty\.call\(cellDraftValues, key\)\) return cellDraftValues\[key\]/);
   assert.match(changeHandler, /setCellDraftValues\(\(current\) => \(\{ \.\.\.current, \[key\]: value \}\)\)/);
+  assert.match(changeHandler, /\^layer\\d\+-thickness\$\/\.test\(column\)\) return;/);
   assert.match(commitSource, /normalizeThicknessText\(draftValue\)/);
   assert.match(rowEditorSource, /<Combo \{\.\.\.comboCellProps\(`layer\$\{layerIndex\}-thickness`\)\}[\s\S]*dir="ltr"/);
+});
+
+test("lost pointer capture always releases smart-table interaction state", () => {
+  const pointerGesture = sourceSection("function registerEntryPointerGesture(", "function widthsForRequestedTotal(");
+
+  assert.match(pointerGesture, /target\?\.addEventListener\?\.\("lostpointercapture", stop, true\)/);
+  assert.match(pointerGesture, /target\?\.removeEventListener\?\.\("lostpointercapture", stop, true\)/);
+  assert.match(pointerGesture, /function stop\(event\) \{[\s\S]*cleanup\(\);[\s\S]*finish\?\.\(event\);/);
+  assert.match(pointerGesture, /if \(bodyClass\) document\.body\.classList\.remove\(bodyClass\)/);
 });
 
 test("smart-table selected-but-not-editing cells use spreadsheet selection affordance", () => {

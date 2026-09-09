@@ -1,8 +1,8 @@
 {
   "name": "yd-glass-manager",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Glass Orders, Suppliers & Manufacturing",
-  "author": "Y.D Software",
+  "author": "Yasser Diab",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",

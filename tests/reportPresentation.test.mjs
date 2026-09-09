@@ -4,6 +4,7 @@ import test from "node:test";
 
 const appSource = readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const styleSource = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const themeV013Source = readFileSync(new URL("../src/styles/theme-v013.css", import.meta.url), "utf8");
 const groupingSource = readFileSync(new URL("../src/glassGrouping.js", import.meta.url), "utf8");
 
 function sourceBetween(start, end) {
@@ -134,6 +135,22 @@ test("status-only mobile layout keeps cards and filters viewport-safe", () => {
   assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-app-shell\s*\{[\s\S]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)/);
   assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-filter-row\s*\{[\s\S]*grid-template-columns:\s*1fr/);
   assert.match(styleSource, /@media \(max-width: 680px\)\s*\{[\s\S]*\.status-card-actions\s*\{[\s\S]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+});
+
+test("medium desktop order status table fits the workspace before adding optional costs", () => {
+  assert.match(themeV013Source, /@media \(min-width: 681px\) and \(max-width: 1750px\)\s*\{[\s\S]*?\.status-table\.without-cost\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-width:\s*0/);
+  assert.match(themeV013Source, /\.status-table\.without-cost \.status-row\s*\{[\s\S]*?88px 92px 106px/);
+  assert.match(themeV013Source, /\.status-table\.without-cost \.status-row select,[\s\S]*?width:\s*100%/);
+});
+
+test("dense order-status controls use concise workflow labels without changing report labels", () => {
+  const orderStatusView = sourceBetween("function OrdersStatusView(", "function WorkflowStatusConfirmationDialog(");
+  assert.match(appSource, /compactLabel: "تم الطلب"/);
+  assert.match(appSource, /compactLabel: "قيد التصنيع"/);
+  assert.match(appSource, /function compactStatusLabel\(value\)/);
+  assert.match(orderStatusView, /aria-label=\{`حالة \$\{displayOrderNo\(order\.orderNo\)\}`\}/);
+  assert.match(orderStatusView, /compactStatusLabel\(item\.value\)/);
+  assert.match(appSource, /function statusLabel\(value\)\s*\{[\s\S]*?return orderStatusDef\(value\)\.label/);
 });
 
 test("mobile full order-entry layout does not keep the main form sticky over the table", () => {

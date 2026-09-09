@@ -2,7 +2,9 @@ $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $androidDir = Join-Path $root "android"
-$assetsParent = Resolve-Path (Join-Path $androidDir "app\src\main\assets")
+# Capacitor creates this ignored directory during `cap sync`. Keep it as a
+# literal path until then so a clean checkout can use the debug fallback.
+$assetsParent = Join-Path $androidDir "app\src\main\assets"
 $publicAssets = Join-Path $assetsParent "public"
 $outDir = Join-Path $root "dist-android"
 $version = (Get-Content -Raw -LiteralPath (Join-Path $root "package.json") | ConvertFrom-Json).version

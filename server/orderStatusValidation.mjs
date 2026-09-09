@@ -41,7 +41,7 @@ function strictJsonNumber(value, label) {
 function normalizedIncomingRows(patch) {
   if (patch.rows === undefined) return [];
   if (!Array.isArray(patch.rows)) {
-    fail("invalid_rows", "صفوف الاستلام يجب أن تكون قائمة صالحة.");
+    fail("invalid_rows", "بنود الاستلام يجب أن تكون قائمة صالحة.");
   }
   return patch.rows;
 }
@@ -96,7 +96,7 @@ export function validateLocalOrderStatusPatch({
     const stored = storedById.get(rowId);
     if (!stored) {
       if (ownerById.has(rowId) && ownerById.get(rowId) !== String(orderId)) {
-        fail("wrong_order_row", "أحد صفوف الاستلام لا يتبع هذا الطلب.", 403);
+        fail("wrong_order_row", "أحد بنود الاستلام لا يتبع هذا الطلب.", 403);
       }
       fail("unknown_row", `صف الاستلام ${rowId} غير موجود.`);
     }
@@ -142,7 +142,7 @@ export function validateLocalOrderStatusPatch({
     fail("received_total_exceeds_ordered", "إجمالي الكمية المستلمة أكبر من إجمالي الكمية المطلوبة.");
   }
   if (normalizedRows.length && Math.abs(totalReceived - requestedCollected) > EPSILON) {
-    fail("collected_total_mismatch", "إجمالي الكمية المستلمة لا يطابق صفوف الاستلام.");
+    fail("collected_total_mismatch", "إجمالي الكمية المستلمة لا يطابق بنود الاستلام.");
   }
 
   const persistedCollected = normalizedRows.length ? totalReceived : requestedCollected;

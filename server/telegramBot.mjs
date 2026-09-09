@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import XLSX from "xlsx";
@@ -16,14 +17,22 @@ const arabicDigits = new Map([
   ["۰", "0"], ["۱", "1"], ["۲", "2"], ["۳", "3"], ["۴", "4"],
   ["۵", "5"], ["۶", "6"], ["۷", "7"], ["۸", "8"], ["۹", "9"]
 ]);
-const selectedSupplierByChat = new Map();
+const pendingStatusUpdates = new Map();
+const telegramStatusActions = [
+  { status: "ordered", label: "تم الطلب" },
+  { status: "fabrication", label: "قيد التصنيع" },
+  { status: "ready", label: "جاهز للاستلام" },
+  { status: "collected", label: "تم الاستلام" }
+];
 
 let workbookRows = [];
 let workbookColumns = [];
 let suppliersCache = [];
+let supabaseOrdersByLookupCode = new Map();
 let lastLoadedAt = "";
 let dataSource = "Excel";
 let stopRequested = false;
+let warnedAboutExcelOnlyMode = false;
 
 function readEnvFile(filePath) {
   try {
@@ -45,9 +54,18 @@ function readEnvFile(filePath) {
   }
 }
 
+function resolveBotAssetPath(value, fallback) {
+  const specified = String(value || "").trim();
+  if (!specified) return fallback;
+  return path.isAbsolute(specified) ? specified : path.resolve(botDir, specified);
+}
+
 const env = { ...readEnvFile(path.join(root, ".env.local")), ...readEnvFile(path.join(botDir, ".env")), ...process.env };
 const botToken = env.BOT_TOKEN || env.TELEGRAM_BOT_TOKEN || "";
-const workbookPath = env.EXCEL_FILE || env.GLASS_ORDERS_WORKBOOK_PATH || path.join(botDir, "طلب شراء زجاج.xlsm");
+const workbookPath = resolveBotAssetPath(
+  env.GLASS_ORDERS_WORKBOOK_PATH || env.EXCEL_FILE,
+  path.join(botDir, "طلب شراء زجاج.xlsm")
+);
 const sheetName = env.SHEET_NAME || "الادخال";
 const supabaseUrl = env.VITE_SUPABASE_URL || env.SUPABASE_URL || "";
 const supabaseKey = env.VITE_SUPABASE_ANON_KEY || env.SUPABASE_ANON_KEY || "";
@@ -201,7 +219,7 @@ function threadExtra(threadId, extra = {}) {
 
 function loadWorkbook() {
   if (!fs.existsSync(workbookPath)) throw new Error(`Excel file was not found: ${workbookPath}`);
-  const workbook = XLSX.readFile(workbookPath, { cellDates: true });
+  const workbook = XLSX.read(fs.readFileSync(workbookPath), { type: "buffer", cellDates: true });
   const sheet = workbook.Sheets[sheetName] || workbook.Sheets[workbook.SheetNames[0]];
   if (!sheet) throw new Error(`Sheet was not found: ${sheetName}`);
   workbookRows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
@@ -230,35 +248,8 @@ function rowGlassDescription(row) {
 }
 
 async function loadSupabase() {
-  if (!supabaseUrl || !supabaseKey || !supabaseAccessToken || !supabaseRefreshToken) {
-    throw new Error("The signed-in Supabase session is unavailable. Sign in to Y.D Glass Manager before starting Telegram.");
-  }
-  const client = createClient(supabaseUrl, supabaseKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: true,
-      detectSessionInUrl: false
-    }
-  });
-  const authResult = await client.auth.setSession({
-    access_token: supabaseAccessToken,
-    refresh_token: supabaseRefreshToken
-  });
-  if (authResult.error || !authResult.data?.user?.id) {
-    throw authResult.error || new Error("The signed-in Supabase session could not be established for Telegram.");
-  }
-  client.auth.startAutoRefresh?.();
-  const profileResult = await client
-    .from("users")
-    .select("role, can_view_costs, is_active")
-    .eq("auth_user_id", authResult.data.user.id)
-    .maybeSingle();
-  if (profileResult.error) throw profileResult.error;
-  const profile = profileResult.data;
-  if (!profile?.is_active) throw new Error("Supabase bot profile is not active.");
-  if (profile.role !== "admin" && profile.can_view_costs !== true) {
-    throw new Error("Supabase bot profile does not have cost-view permission.");
-  }
+  const client = await createSupabaseSessionClient();
+  await requireActiveBotProfile(client);
   const [orders, rows, countsResult] = await Promise.all([
     supabaseRpcAllCompat(client, "load_glass_orders_page", "load_glass_orders"),
     supabaseRpcAllCompat(client, "load_glass_order_rows_page", "load_glass_order_rows"),
@@ -274,8 +265,10 @@ async function loadSupabase() {
     if (!byOrder.has(row.order_id)) byOrder.set(row.order_id, []);
     byOrder.get(row.order_id).push(row);
   }
+  supabaseOrdersByLookupCode = new Map();
   workbookRows = [];
   for (const order of orders || []) {
+    rememberSupabaseOrder(order);
     const orderRows = byOrder.get(order.id) || [{}];
     const hasAnyExplicitReceived = orderRows.some((row) => row.received_quantity !== undefined && row.received_quantity !== null && row.received_quantity !== "");
     let legacyReceivedRemaining = hasAnyExplicitReceived ? 0 : numberValue(order.collected_pieces);
@@ -309,6 +302,61 @@ async function loadSupabase() {
   lastLoadedAt = new Date().toLocaleString("ar-EG");
   dataSource = "Supabase";
   return workbookRows.length;
+}
+
+async function createSupabaseSessionClient() {
+  if (!supabaseUrl || !supabaseKey || !supabaseAccessToken || !supabaseRefreshToken) {
+    throw new Error("The signed-in Supabase session is unavailable. Sign in to Y.D Glass Manager before starting Telegram.");
+  }
+  const client = createClient(supabaseUrl, supabaseKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: true,
+      detectSessionInUrl: false
+    }
+  });
+  const authResult = await client.auth.setSession({
+    access_token: supabaseAccessToken,
+    refresh_token: supabaseRefreshToken
+  });
+  if (authResult.error || !authResult.data?.user?.id) {
+    throw authResult.error || new Error("The signed-in Supabase session could not be established for Telegram.");
+  }
+  client.auth.startAutoRefresh?.();
+  return client;
+}
+
+async function requireActiveBotProfile(client) {
+  const authResult = await client.auth.getUser();
+  if (authResult.error || !authResult.data?.user?.id) {
+    throw authResult.error || new Error("The signed-in Supabase session could not be established for Telegram.");
+  }
+  const profileResult = await client
+    .from("users")
+    .select("role, can_view_costs, is_active")
+    .eq("auth_user_id", authResult.data.user.id)
+    .maybeSingle();
+  if (profileResult.error) throw profileResult.error;
+  const profile = profileResult.data;
+  if (!profile?.is_active) throw new Error("Supabase bot profile is not active.");
+  if (profile.role !== "admin" && profile.can_view_costs !== true) {
+    throw new Error("Supabase bot profile does not have cost-view permission.");
+  }
+}
+
+function rememberSupabaseOrder(order = {}) {
+  for (const value of [order.order_no, order.document_id]) {
+    const key = cleanCode(value);
+    if (!key) continue;
+    const matches = supabaseOrdersByLookupCode.get(key) || [];
+    if (!matches.some((candidate) => String(candidate.id) === String(order.id))) matches.push(order);
+    supabaseOrdersByLookupCode.set(key, matches);
+  }
+}
+
+function uniqueSupabaseOrderForCode(value) {
+  const matches = supabaseOrdersByLookupCode.get(cleanCode(value)) || [];
+  return matches.length === 1 ? matches[0] : null;
 }
 
 async function supabaseRpcAll(client, functionName, args = {}) {
@@ -365,9 +413,21 @@ async function supabaseDataCountsCompat(client) {
   return { order_count: Number(ordersResult.count), row_count: Number(rowsResult.count) };
 }
 
+function hasSupabaseStatusSession() {
+  return [supabaseUrl, supabaseKey, supabaseAccessToken, supabaseRefreshToken].every(Boolean);
+}
+
+function hasPartialSupabaseStatusSession() {
+  return [supabaseUrl, supabaseKey, supabaseAccessToken, supabaseRefreshToken].some(Boolean)
+    && !hasSupabaseStatusSession();
+}
+
 async function loadDataSource() {
-  const supabaseConfigured = !!(supabaseUrl || supabaseKey || supabaseAccessToken || supabaseRefreshToken);
-  if (supabaseConfigured) return loadSupabase();
+  if (hasSupabaseStatusSession()) return loadSupabase();
+  if (hasPartialSupabaseStatusSession() && !warnedAboutExcelOnlyMode) {
+    warnedAboutExcelOnlyMode = true;
+    console.warn("Telegram bot is using Excel-only reporting. Start it from the signed-in Windows app to enable secure order-status updates.");
+  }
   return loadWorkbook();
 }
 
@@ -533,6 +593,73 @@ function callbackButton(text, data) {
   return { text, callback_data: data };
 }
 
+function prunePendingStatusUpdates() {
+  const now = Date.now();
+  for (const [token, pending] of pendingStatusUpdates) {
+    if (pending.expiresAt <= now) pendingStatusUpdates.delete(token);
+  }
+}
+
+function statusButtonsForOrder(chatId, threadId, order = {}) {
+  prunePendingStatusUpdates();
+  const orderId = String(order.id || "").trim();
+  if (!orderId) return null;
+  const currentStatus = String(order.status || "").trim();
+  const actions = telegramStatusActions.filter((action) => action.status !== currentStatus);
+  if (!actions.length) return null;
+  return {
+    inline_keyboard: actions.map((action) => {
+      const token = randomUUID().replace(/-/g, "").slice(0, 18);
+      pendingStatusUpdates.set(token, {
+        chatId: String(chatId),
+        threadId: Number(threadId || 0),
+        orderId,
+        orderNo: displayOrderNo(order.order_no),
+        documentId: String(order.document_id || ""),
+        status: action.status,
+        expiresAt: Date.now() + (10 * 60 * 1000)
+      });
+      return [callbackButton(action.label, `status:${token}:${action.status}`)];
+    })
+  };
+}
+
+function pendingStatusUpdateForCallback(query = {}) {
+  prunePendingStatusUpdates();
+  const match = String(query.data || "").match(/^status:([a-f0-9]{18}):(ordered|fabrication|ready|collected)$/);
+  if (!match) return null;
+  const pending = pendingStatusUpdates.get(match[1]);
+  if (!pending || pending.status !== match[2]) return null;
+  const chatId = String(query.message?.chat?.id || "");
+  const threadId = Number(query.message?.message_thread_id || 0);
+  if (pending.chatId !== chatId || pending.threadId !== threadId) return null;
+  pendingStatusUpdates.delete(match[1]);
+  return pending;
+}
+
+async function answerCallbackQuery(query, text) {
+  if (!query?.id) return;
+  await telegramJson("answerCallbackQuery", {
+    callback_query_id: query.id,
+    text,
+    show_alert: false
+  });
+}
+
+async function updateSupabaseOrderStatus(pending) {
+  const client = await createSupabaseSessionClient();
+  await requireActiveBotProfile(client);
+  const result = await client.rpc("update_order_status", {
+    p_order_id: pending.orderId,
+    p_document_id: pending.documentId || null,
+    p_status: pending.status,
+    p_app_version: "0.1.13",
+    p_client_type: "telegram_bot"
+  });
+  if (result.error) throw result.error;
+  return result.data;
+}
+
 async function sendMessage(chatId, text, extra = {}) {
   return telegramJson("sendMessage", {
     chat_id: chatId,
@@ -561,11 +688,38 @@ async function handleMessage(message) {
   if (!chatId || !code) return;
   await refreshDataSourceForRequest();
   const matches = orderMatches(code);
-  await sendMessage(chatId, matches.length ? searchReply(code, matches) : "لا توجد بيانات لهذا الرقم.", threadExtra(threadId));
+  const order = dataSource === "Supabase" ? uniqueSupabaseOrderForCode(code) : null;
+  const markup = order ? statusButtonsForOrder(chatId, threadId, order) : null;
+  const statusUpdateNotice = matches.length && dataSource !== "Supabase"
+    ? "\n\nتحديث حالة الطلب متاح عند تشغيل البوت من تطبيق Windows بعد تسجيل الدخول."
+    : "";
+  await sendMessage(
+    chatId,
+    matches.length ? `${searchReply(code, matches)}${statusUpdateNotice}` : "لا توجد بيانات لهذا الرقم.",
+    threadExtra(threadId, markup ? { reply_markup: markup } : {})
+  );
 }
 
 async function handleCallback(query) {
-  return;
+  const pending = pendingStatusUpdateForCallback(query);
+  if (!pending) {
+    await answerCallbackQuery(query, "هذا الاختيار غير صالح أو انتهت صلاحيته. ابحث عن الطلب مرة أخرى.");
+    return;
+  }
+  try {
+    await updateSupabaseOrderStatus(pending);
+    await refreshDataSourceForRequest();
+    const label = statusLabel(pending.status);
+    await answerCallbackQuery(query, `تم التحديث: ${label}`);
+    await sendMessage(
+      pending.chatId,
+      `تم تحديث حالة ${pending.orderNo} إلى: ${label}.`,
+      threadExtra(pending.threadId)
+    );
+  } catch (error) {
+    console.error(`Telegram status update error: ${error.message}`);
+    await answerCallbackQuery(query, "تعذر تحديث الحالة. ابحث عن الطلب وحاول مرة أخرى.");
+  }
 }
 
 async function handleUpdate(update) {
@@ -598,7 +752,7 @@ async function main() {
       const updates = await telegramJson("getUpdates", {
         timeout: 25,
         offset,
-        allowed_updates: ["message"]
+        allowed_updates: ["message", "callback_query"]
       });
       if (retryAttempt > 0) {
         console.log("Telegram bot polling reconnected.");
