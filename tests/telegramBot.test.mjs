@@ -74,9 +74,11 @@ test("packaged bot reads its token from telegram_excel_bot and stops retrying co
   assert.match(botSource, /readEnvFile\(path\.join\(botDir,\s*"\.env"\)\)/);
   assert.match(botSource, /env\.BOT_TOKEN/);
 
-  const packagedBotResource = packageJson.build.extraResources.find((entry) => entry.from === "telegram_excel_bot");
-  assert.ok(packagedBotResource);
-  assert.ok(packagedBotResource.filter.includes(".env"));
+  const packagedBotEnvResource = packageJson.build.extraResources.find((entry) => entry.from === "telegram_excel_bot/.env");
+  assert.deepEqual(packagedBotEnvResource, {
+    from: "telegram_excel_bot/.env",
+    to: "telegram_excel_bot/.env"
+  });
 });
 
 test("Telegram resolves relative workbook settings beside its bot assets", () => {
@@ -132,8 +134,8 @@ test("Telegram status actions use short-lived chat-bound callbacks and the secur
   assert.match(callbackResolver, /pending\.chatId !== chatId \|\| pending\.threadId !== threadId/);
   assert.match(callbackResolver, /pendingStatusUpdates\.delete/);
   assert.match(updater, /client\.rpc\("update_order_status"/);
-  assert.match(updater, /p_app_version:\s*"0\.1\.13"/);
-  assert.match(updater, /p_client_type:\s*"telegram_bot"/);
+  assert.match(updater, /p_app_version:\s*"0\.1\.14"/);
+  assert.match(updater, /telegram_bot\|status_revision=\$\{Math\.max/);
   assert.doesNotMatch(updater, /\.from\("glass_orders"\)\.update/);
   assert.match(handleCallback, /await updateSupabaseOrderStatus\(pending\)/);
   assert.match(botSource, /allowed_updates:\s*\["message", "callback_query"\]/);

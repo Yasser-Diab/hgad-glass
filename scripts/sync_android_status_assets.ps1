@@ -12,13 +12,11 @@ if (!(Test-Path $statusDist)) {
 $resolvedTarget = [System.IO.Path]::GetFullPath($androidAssets)
 $resolvedParent = [System.IO.Path]::GetFullPath($androidAssetsParent)
 if (!$resolvedTarget.StartsWith($resolvedParent, [System.StringComparison]::OrdinalIgnoreCase)) {
-  throw "Refusing to delete unexpected Android asset path: $resolvedTarget"
-}
-
-if (Test-Path $androidAssets) {
-  Remove-Item -LiteralPath $androidAssets -Recurse -Force
+  throw "Refusing to use unexpected Android asset path: $resolvedTarget"
 }
 
 New-Item -ItemType Directory -Force -Path $androidAssets | Out-Null
+# The current index.html selects the status bundle. Retaining old hashed files
+# avoids destructive directory replacement on external workspaces.
 Copy-Item -Path (Join-Path $statusDist "*") -Destination $androidAssets -Recurse -Force
 Write-Host "Android status assets synced: $androidAssets"

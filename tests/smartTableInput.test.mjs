@@ -129,19 +129,25 @@ test("table dropdown controls and combo cells open from controls and Space", () 
   assert.doesNotMatch(fillDownSource, /onClick=\{\(event\) => \{[\s\S]*onCopyDown\?\.\(column\)/);
 });
 
-test("thickness cell editing preserves raw typed text until commit", () => {
+test("thickness cell commits selected suggestions without truncating raw typed text", () => {
   const entrySource = sourceSection("function EntryView(", "function GlassRowEditor(");
   const rowEditorSource = sourceSection("function GlassRowEditor(", "function thicknessMmValue(");
   const commitSource = sourceSection("function commitEditingCell(", "function handleCellDraftChange(");
   const changeHandler = sourceSection("function handleCellDraftChange(", "function handleCellBlur(");
+  const comboSource = sourceSection("function Combo(", "function SearchBox(");
 
   assert.match(entrySource, /const \[cellDraftValues, setCellDraftValues\] = useState\(\{\}\)/);
   assert.match(entrySource, /function cellDraftKey\(rowIndex, column/);
   assert.match(entrySource, /Object\.prototype\.hasOwnProperty\.call\(cellDraftValues, key\)\) return cellDraftValues\[key\]/);
   assert.match(changeHandler, /setCellDraftValues\(\(current\) => \(\{ \.\.\.current, \[key\]: value \}\)\)/);
-  assert.match(changeHandler, /\^layer\\d\+-thickness\$\/\.test\(column\)\) return;/);
+  assert.match(changeHandler, /\^layer\\d\+-thickness\$\/\.test\(column\) && !options\.commit/);
+  assert.match(changeHandler, /delete next\[key\]/);
+  assert.doesNotMatch(changeHandler, /commitEditingCell\(nextCell\)/);
   assert.match(commitSource, /normalizeThicknessText\(draftValue\)/);
   assert.match(rowEditorSource, /<Combo \{\.\.\.comboCellProps\(`layer\$\{layerIndex\}-thickness`\)\}[\s\S]*dir="ltr"/);
+  assert.match(rowEditorSource, /onChange=\{\(thickness, options\) => onCellValueChange\(index, `layer\$\{layerIndex\}-thickness`, thickness, options\)\}/);
+  assert.match(rowEditorSource, /onSuggestionCommit=\{\(thickness\) => commitSuggestionAndMove\(`layer\$\{layerIndex\}-thickness`, thickness\)\}/);
+  assert.match(comboSource, /onChange\(nextValue, \{ commit: true, source: "suggestion" \}\)/);
 });
 
 test("lost pointer capture always releases smart-table interaction state", () => {

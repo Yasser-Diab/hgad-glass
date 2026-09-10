@@ -18,12 +18,12 @@ function Invoke-NpmScript {
   }
 }
 
-function Invoke-CapCopy {
+function Invoke-FullAssetSync {
   Push-Location $root
   try {
-    & npx cap copy android
+    & powershell -ExecutionPolicy Bypass -File "scripts/sync_android_full_assets.ps1"
     if ($LASTEXITCODE -ne 0) {
-      throw "Capacitor copy failed with exit code $LASTEXITCODE"
+      throw "Full Android asset sync failed with exit code $LASTEXITCODE"
     }
   } finally {
     Pop-Location
@@ -37,7 +37,7 @@ function Invoke-Gradle {
     if (!(Test-Path ".\gradlew.bat")) {
       throw "gradlew.bat was not found in android directory."
     }
-    & .\gradlew.bat $TaskName
+    & .\gradlew.bat "--no-daemon" "-Dorg.gradle.vfs.watch=false" $TaskName
     if ($LASTEXITCODE -ne 0) {
       throw "Gradle task $TaskName failed with exit code $LASTEXITCODE"
     }
@@ -85,4 +85,4 @@ Copy-DebugApk "status" "YDGlassManager-OrderStatus-Android-debug-v$version.apk"
 # Leave the Android project on the full application bundle after producing the
 # status-only debug APK, matching the release script behavior.
 Invoke-NpmScript "build:web"
-Invoke-CapCopy
+Invoke-FullAssetSync

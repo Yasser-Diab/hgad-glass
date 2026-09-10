@@ -41,7 +41,7 @@ function Invoke-Gradle {
     if (!(Test-Path ".\gradlew.bat")) {
       throw "gradlew.bat was not found in android directory."
     }
-    & .\gradlew.bat $TaskName
+    & .\gradlew.bat "--no-daemon" "-Dorg.gradle.vfs.watch=false" $TaskName
     if ($LASTEXITCODE -ne 0) {
       throw "Gradle task $TaskName failed with exit code $LASTEXITCODE"
     }
@@ -107,9 +107,9 @@ if (!(Test-Path -LiteralPath $releaseStorePath -PathType Leaf)) {
 Invoke-NpmScript "build:web"
 Push-Location $root
 try {
-  & npx cap sync android
+  & powershell -ExecutionPolicy Bypass -File "scripts/sync_android_full_assets.ps1"
   if ($LASTEXITCODE -ne 0) {
-    throw "Capacitor sync failed with exit code $LASTEXITCODE"
+    throw "Full Android asset sync failed with exit code $LASTEXITCODE"
   }
 } finally {
   Pop-Location

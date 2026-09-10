@@ -129,6 +129,9 @@ const UPDATE_LAST_ALERT_KEY = "glassOrdersLastUpdateAlert";
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const TELEGRAM_BOT_SETTINGS_KEY = "glassOrdersTelegramBotSettings";
 const PASTE_PREFERENCES_STORAGE_KEY = "glassOrdersPastePreferences";
+const GLASS_SYNC_STATE_TABLE = "glass_sync_state";
+const GLASS_SYNC_POLL_INTERVAL_MS = 45 * 1000;
+const GLASS_SYNC_REFRESH_DELAY_MS = 360;
 
 let pdfExportModulesPromise = null;
 let qrCodeModulePromise = null;
@@ -741,6 +744,12 @@ function isSupabaseSchemaCacheError(error) {
 }
 
 function friendlySaveError(error) {
+  if (isOrderStatusConflict(error)) {
+    return "تم تعديل حالة الطلب من جهاز آخر. تم تحديث البيانات بالقيمة الحالية ولم يتم استبدالها.";
+  }
+  if (isOrderStatusClientUpgradeRequired(error)) {
+    return "يلزم تثبيت الإصدار الحالي من التطبيق قبل تحديث حالة الطلب.";
+  }
   if (isDuplicateOrderNoError(error)) {
     return "تعذر إنشاء رقم فريد للطلب، ولم يتم فقد أي من البيانات المدخلة. يرجى إعادة المحاولة.";
   }
@@ -3108,6 +3117,7 @@ function createDraft(overrides = {}) {
     date,
     entryAt,
     status: normalizeOrderStatus(overrides.status || "ordered"),
+    statusRevision: Math.max(0, Math.trunc(numberValue(overrides.statusRevision ?? overrides.status_revision))),
     collectedPieces: numberValue(overrides.collectedPieces),
     entryMode: overrides.entryMode || "normal",
     customerId: overrides.customerId || overrides.customer_id || "",
@@ -3165,6 +3175,7 @@ function orderSaveSnapshot(order = {}) {
     date: cloned.date || today(),
     entryAt: cloned.entryAt || "",
     status: normalizeOrderStatus(cloned.status || "ordered"),
+    statusRevision: Math.max(0, Math.trunc(numberValue(cloned.statusRevision ?? cloned.status_revision))),
     collectedPieces: databaseNumber(cloned.collectedPieces, 0),
     entryMode: cloned.entryMode || "normal",
     customerId: cleanName(cloned.customerId || cloned.customer_id),
@@ -3799,6 +3810,34 @@ function isConnectivityError(error) {
   return !navigator.onLine || /failed to fetch|network|timeout|load failed|abort|internet|offline|econn|enotfound|etimedout/i.test(text);
 }
 
+function isOrderStatusConflict(error) {
+  return /ORDER_STATUS_CONFLICT/i.test([
+    error?.code,
+    error?.message,
+    error?.details,
+    error?.hint,
+    safeErrorMessage(error)
+  ].filter(Boolean).join(" "));
+}
+
+function isOrderStatusClientUpgradeRequired(error) {
+  return /ORDER_STATUS_CLIENT_UPGRADE_REQUIRED/i.test([
+    error?.code,
+    error?.message,
+    error?.details,
+    error?.hint,
+    safeErrorMessage(error)
+  ].filter(Boolean).join(" "));
+}
+
+function statusClientTypeWithRevision(clientType, statusRevision) {
+  const platform = ["web", "android", "ios", "telegram_bot"].includes(cleanName(clientType))
+    ? cleanName(clientType)
+    : "web";
+  const revision = Math.max(0, Math.trunc(numberValue(statusRevision)));
+  return `${platform}|status_revision=${revision}`;
+}
+
 function upsertOfflineOrder(data, order) {
   const orders = [...(data.orders || [])];
   const nextOrder = { ...order, id: order.id || uid(), offlinePending: true, offlineQueuedAt: new Date().toISOString() };
@@ -4191,6 +4230,7 @@ async function loadData() {
             date: order.issue_date || order.order_date,
             entryAt: order.entry_at || "",
             status: order.status,
+            statusRevision: order.status_revision,
             collectedPieces: order.collected_pieces || order.collectedPieces || 0,
             entryMode: order.entry_mode,
             customerId: order.customer_id || "",
@@ -4234,6 +4274,91 @@ async function loadData() {
     learnedTableOptions: mergeLearnedTableOptions(local.learnedTableOptions, localLearnedTableOptions),
     source: "browser"
   };
+}
+
+function useSupabaseDataSync(currentUser, onRemoteChange) {
+  const remoteChangeRef = useRef(onRemoteChange);
+  useEffect(() => {
+    remoteChangeRef.current = onRemoteChange;
+  }, [onRemoteChange]);
+
+  useEffect(() => {
+    if (!currentUser?.id || !supabaseEnabled()) return undefined;
+    const client = getSupabaseClient();
+    if (!client) return undefined;
+    let active = true;
+    let refreshTimer = null;
+    let refreshInFlight = false;
+    let knownRevision = null;
+
+    function readRevision(value) {
+      return Math.max(0, Math.trunc(numberValue(value)));
+    }
+
+    async function refreshFromRemote() {
+      if (!active || refreshInFlight || readOfflineQueue().length) return;
+      refreshInFlight = true;
+      try {
+        await remoteChangeRef.current?.();
+      } catch (error) {
+        console.warn(maskSensitiveText(`Remote data refresh skipped: ${safeErrorMessage(error)}`));
+      } finally {
+        refreshInFlight = false;
+      }
+    }
+
+    function scheduleRemoteRefresh(revision) {
+      if (revision && knownRevision !== null && revision <= knownRevision) return;
+      if (revision) knownRevision = revision;
+      if (refreshTimer) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        refreshFromRemote();
+      }, GLASS_SYNC_REFRESH_DELAY_MS);
+    }
+
+    async function checkRevision() {
+      const result = await client
+        .from(GLASS_SYNC_STATE_TABLE)
+        .select("revision")
+        .eq("id", true)
+        .maybeSingle();
+      if (result.error) throw result.error;
+      const revision = readRevision(result.data?.revision);
+      if (knownRevision === null) {
+        knownRevision = revision;
+        return;
+      }
+      if (revision > knownRevision) scheduleRemoteRefresh(revision);
+    }
+
+    function checkVisibleRevision() {
+      if (document.visibilityState === "visible") checkRevision().catch(() => null);
+    }
+
+    const channel = client
+      .channel(`glass-sync-${APP_VARIANT}-${currentUser.id}`)
+      .on("postgres_changes", {
+        event: "UPDATE",
+        schema: "public",
+        table: GLASS_SYNC_STATE_TABLE
+      }, (payload) => scheduleRemoteRefresh(readRevision(payload.new?.revision)))
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") checkRevision().catch(() => null);
+      });
+    const pollTimer = window.setInterval(checkVisibleRevision, GLASS_SYNC_POLL_INTERVAL_MS);
+    window.addEventListener("focus", checkVisibleRevision);
+    document.addEventListener("visibilitychange", checkVisibleRevision);
+
+    return () => {
+      active = false;
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      window.clearInterval(pollTimer);
+      window.removeEventListener("focus", checkVisibleRevision);
+      document.removeEventListener("visibilitychange", checkVisibleRevision);
+      client.removeChannel(channel).catch(() => null);
+    };
+  }, [currentUser?.id]);
 }
 
 async function saveOrderToStore(order, data) {
@@ -4343,10 +4468,15 @@ async function persistOrderStatusToSupabase(client, order, rowsChanged, changedR
       p_document_id: order.documentId || null,
       p_status: normalizeOrderStatus(order.status),
       p_app_version: VERSION,
-      p_client_type: Capacitor.getPlatform()
+      p_client_type: statusClientTypeWithRevision(Capacitor.getPlatform(), order.statusRevision)
     });
   if (result.error) throw result.error;
-  return order;
+  if (rowsChanged) return order;
+  return {
+    ...order,
+    status: normalizeOrderStatus(result.data?.status || order.status),
+    statusRevision: Math.max(0, Math.trunc(numberValue(result.data?.status_revision ?? order.statusRevision)))
+  };
 }
 
 async function patchOrderStatusToStore(order, data, { rowsChanged = false, changedRowIds = [] } = {}) {
@@ -4371,8 +4501,8 @@ async function patchOrderStatusToStore(order, data, { rowsChanged = false, chang
     return next;
   }
   try {
-    await persistOrderStatusToSupabase(client, order, rowsChanged, changedRowIds);
-    return optimistic;
+    const persisted = await persistOrderStatusToSupabase(client, order, rowsChanged, changedRowIds);
+    return mergeOrderStatusPatchData(optimistic, persisted);
   } catch (error) {
     if (!isConnectivityError(error)) throw error;
     const next = { ...optimistic, source: "offline", offlinePending: true };
@@ -4569,6 +4699,7 @@ async function saveOrderToSupabase(client, normalized) {
       order_date: normalized.date,
       entry_at: normalized.entryAt || null,
       status: normalized.status,
+      status_revision: normalized.statusRevision,
       collected_pieces: databaseNumber(normalized.collectedPieces, 0),
       entry_mode: normalized.entryMode,
       customer_id: nullableIdentifier(customer?.id),
@@ -4623,6 +4754,8 @@ async function saveOrderToSupabase(client, normalized) {
   }
   if (!saved?.data?.id) throw new Error("تعذر إنشاء رقم فريد للطلب، ولم يتم فقد أي من البيانات المدخلة. يرجى إعادة المحاولة.");
   const orderId = saved.data.id;
+  normalized.status = normalizeOrderStatus(saved.data?.status || normalized.status);
+  normalized.statusRevision = Math.max(0, Math.trunc(numberValue(saved.data?.status_revision ?? normalized.statusRevision)));
   await persistLearnedGlassOptions(client, normalized.rows);
   return createDraft({
     ...normalized,
@@ -4692,6 +4825,10 @@ async function syncOfflineQueue() {
         synced += 1;
       }
     } catch (error) {
+      if (item.type === "order-status-patch" && isOrderStatusConflict(error)) {
+        console.warn("Discarded a stale offline order-status update after a newer server revision was detected.");
+        continue;
+      }
       remaining.push({ ...item, attempts: numberValue(item.attempts) + 1, lastError: safeErrorMessage(error), lastAttemptAt: new Date().toISOString() });
       if (isConnectivityError(error)) {
         remaining.push(...queue.slice(index + 1));
@@ -4922,6 +5059,12 @@ function App() {
     setDraft(nextDraft);
     setDraftSavedMarker(nextSavedMarker);
   }
+
+  useSupabaseDataSync(currentUser, async () => {
+    const next = await loadData();
+    replaceAppData(next);
+    setPendingSyncCount(readOfflineQueue().length);
+  });
 
   function currentAppSnapshot() {
     const state = appStateRef.current || { activeTab, data, draft, draftSavedMarker };
@@ -6035,6 +6178,24 @@ function App() {
       const isLatestMutation = !mutation || activeMutation?.version === mutation.version;
       if (historyEntry && isLatestMutation) {
         appHistoryRef.current.undo = appHistoryRef.current.undo.filter((entry) => entry.id !== historyEntry.id);
+      }
+      if (isLatestMutation && isOrderStatusConflict(error)) {
+        try {
+          const refreshed = await loadData();
+          replaceAppData(refreshed);
+          const canonicalOrder = findMatchingOrder(refreshed.orders || [], beforeOrder);
+          const latestDraft = appStateRef.current?.draft || draft;
+          if (canonicalOrder && sameOrderIdentity(latestDraft, beforeOrder)) {
+            const canonicalDraft = createDraft(canonicalOrder);
+            replaceDraftState(canonicalDraft, JSON.stringify(canonicalDraft));
+          }
+          setPendingSyncCount(readOfflineQueue().length);
+          setMessage("تم تعديل حالة الطلب من جهاز آخر. تم تحديث الطلب بالقيمة الحالية ولم يتم استبدالها.");
+          return canonicalOrder || null;
+        } catch {
+          setMessage("تم تعديل حالة الطلب من جهاز آخر. حدّث البيانات ثم راجع الحالة الحالية قبل المحاولة.");
+          return null;
+        }
       }
       if (beforeOrder && isLatestMutation) {
         const latestData = appStateRef.current?.data || data;
@@ -7311,14 +7472,25 @@ function EntryView({ draft, setDraft, customers, suppliers, learnedOptions, smar
     const nextCell = makeTableCell(rowIndex, column);
     if (sameTableCell(editingCell, nextCell)) {
       const key = cellDraftKey(rowIndex, column, nextCell.rowId);
-      setCellDraftValues((current) => ({ ...current, [key]: value }));
-      if (/^layer\d+-thickness$/.test(column)) return;
+      if (/^layer\d+-thickness$/.test(column) && !options.commit) {
+        setCellDraftValues((current) => ({ ...current, [key]: value }));
+        return;
+      }
+      if (options.commit) {
+        setCellDraftValues((current) => {
+          if (!Object.prototype.hasOwnProperty.call(current, key)) return current;
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+      } else {
+        setCellDraftValues((current) => ({ ...current, [key]: value }));
+      }
     }
     setCellValue(rowIndex, column, value, {
       label: options.label || "تعديل خلية",
       remember: options.remember
     });
-    if (options.commit) commitEditingCell(nextCell);
   }
   function handleCellBlur(rowIndex, column) {
     if (isEditingCell(rowIndex, column)) {
@@ -8961,10 +9133,9 @@ function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptio
   function moveToNextRow(column) {
     onCellCommitMove(index, column);
   }
-  function commitSuggestionAndMove(column, nextValue, applyValue) {
+  function commitSuggestionAndMove(column, nextValue) {
     learnColumnValue(column, nextValue);
-    onCellValueChange(index, column, nextValue, { buffer: true });
-    applyValue(nextValue);
+    onCellValueChange(index, column, nextValue, { commit: true });
     window.requestAnimationFrame(() => moveToNextRow(column));
   }
   function handleEnter(event) {
@@ -9018,13 +9189,13 @@ function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptio
                   <span className="shared-quantity" dir="ltr">{row.quantity}</span>
                 )}
                 <FillDownCell column={`layer${layerIndex}-glassType`} onCopyDown={onCopyDownCell}>
-                  <Combo {...comboCellProps(`layer${layerIndex}-glassType`)} editing={isCellEditing(index, `layer${layerIndex}-glassType`)} value={cellValue(index, `layer${layerIndex}-glassType`, layer.glassType)} options={smartOptions.glassTypes} onChange={(glassType) => onCellValueChange(index, `layer${layerIndex}-glassType`, glassType)} onSuggestionCommit={(glassType) => commitSuggestionAndMove(`layer${layerIndex}-glassType`, glassType, (nextValue) => updateLayer(layerIndex, { glassType: nextValue }))} />
+                  <Combo {...comboCellProps(`layer${layerIndex}-glassType`)} editing={isCellEditing(index, `layer${layerIndex}-glassType`)} value={cellValue(index, `layer${layerIndex}-glassType`, layer.glassType)} options={smartOptions.glassTypes} onChange={(glassType, options) => onCellValueChange(index, `layer${layerIndex}-glassType`, glassType, options)} onSuggestionCommit={(glassType) => commitSuggestionAndMove(`layer${layerIndex}-glassType`, glassType)} />
                 </FillDownCell>
                 <FillDownCell column={`layer${layerIndex}-company`} onCopyDown={onCopyDownCell}>
-                  <Combo {...comboCellProps(`layer${layerIndex}-company`)} editing={isCellEditing(index, `layer${layerIndex}-company`)} value={cellValue(index, `layer${layerIndex}-company`, layer.company)} options={smartOptions.companies} onChange={(company) => onCellValueChange(index, `layer${layerIndex}-company`, company)} onSuggestionCommit={(company) => commitSuggestionAndMove(`layer${layerIndex}-company`, company, (nextValue) => updateLayer(layerIndex, { company: nextValue }))} />
+                  <Combo {...comboCellProps(`layer${layerIndex}-company`)} editing={isCellEditing(index, `layer${layerIndex}-company`)} value={cellValue(index, `layer${layerIndex}-company`, layer.company)} options={smartOptions.companies} onChange={(company, options) => onCellValueChange(index, `layer${layerIndex}-company`, company, options)} onSuggestionCommit={(company) => commitSuggestionAndMove(`layer${layerIndex}-company`, company)} />
                 </FillDownCell>
                 <FillDownCell column={`layer${layerIndex}-thickness`} onCopyDown={onCopyDownCell}>
-                  <Combo {...comboCellProps(`layer${layerIndex}-thickness`)} editing={isCellEditing(index, `layer${layerIndex}-thickness`)} dir="ltr" value={cellValue(index, `layer${layerIndex}-thickness`, layer.thickness)} options={smartOptions.thicknesses} onChange={(thickness) => onCellValueChange(index, `layer${layerIndex}-thickness`, thickness)} onSuggestionCommit={(thickness) => commitSuggestionAndMove(`layer${layerIndex}-thickness`, thickness, (nextValue) => updateLayer(layerIndex, { thickness: nextValue }))} />
+                  <Combo {...comboCellProps(`layer${layerIndex}-thickness`)} editing={isCellEditing(index, `layer${layerIndex}-thickness`)} dir="ltr" value={cellValue(index, `layer${layerIndex}-thickness`, layer.thickness)} options={smartOptions.thicknesses} onChange={(thickness, options) => onCellValueChange(index, `layer${layerIndex}-thickness`, thickness, options)} onSuggestionCommit={(thickness) => commitSuggestionAndMove(`layer${layerIndex}-thickness`, thickness)} />
                 </FillDownCell>
                 <FillDownCell column={`layer${layerIndex}-unitPrice`} onCopyDown={onCopyDownCell}>
                   <input {...tableCellProps(`layer${layerIndex}-unitPrice`)} inputMode="decimal" dir="ltr" value={cellValue(index, `layer${layerIndex}-unitPrice`, layer.unitPrice)} onChange={(e) => onCellValueChange(index, `layer${layerIndex}-unitPrice`, e.target.value)} placeholder="سعر/م2" title="سعر هذه الطبقة لكل متر مربع" />
@@ -9042,11 +9213,11 @@ function GlassRowEditor({ row, index, rowHeight = 68, supplierName, learnedOptio
                   <div className="material-choice">
                     {row.glassMode === "double" ? (
                       <FillDownCell column="doubleGap" onCopyDown={onCopyDownCell}>
-                        <Combo {...comboCellProps("doubleGap")} editing={isCellEditing(index, "doubleGap")} value={cellValue(index, "doubleGap", row.doubleGap)} options={smartOptions.gaps || learnedOptions} onChange={(doubleGap) => onCellValueChange(index, "doubleGap", doubleGap)} onSuggestionCommit={(doubleGap) => commitSuggestionAndMove("doubleGap", doubleGap, (nextValue) => patchMaterial({ doubleGap: nextValue }))} />
+                        <Combo {...comboCellProps("doubleGap")} editing={isCellEditing(index, "doubleGap")} value={cellValue(index, "doubleGap", row.doubleGap)} options={smartOptions.gaps || learnedOptions} onChange={(doubleGap, options) => onCellValueChange(index, "doubleGap", doubleGap, options)} onSuggestionCommit={(doubleGap) => commitSuggestionAndMove("doubleGap", doubleGap)} />
                       </FillDownCell>
                     ) : (
                       <FillDownCell column="triplexPvb" onCopyDown={onCopyDownCell}>
-                        <Combo {...comboCellProps("triplexPvb")} editing={isCellEditing(index, "triplexPvb")} value={cellValue(index, "triplexPvb", row.triplexPvb)} options={smartOptions.pvb} onChange={(triplexPvb) => onCellValueChange(index, "triplexPvb", triplexPvb)} onSuggestionCommit={(triplexPvb) => commitSuggestionAndMove("triplexPvb", triplexPvb, (nextValue) => patchMaterial({ triplexPvb: nextValue }))} />
+                        <Combo {...comboCellProps("triplexPvb")} editing={isCellEditing(index, "triplexPvb")} value={cellValue(index, "triplexPvb", row.triplexPvb)} options={smartOptions.pvb} onChange={(triplexPvb, options) => onCellValueChange(index, "triplexPvb", triplexPvb, options)} onSuggestionCommit={(triplexPvb) => commitSuggestionAndMove("triplexPvb", triplexPvb)} />
                       </FillDownCell>
                     )}
                   </div>
@@ -14794,10 +14965,10 @@ function Combo({ value, options, onChange, className = "", onSuggestionCommit, e
     window.clearTimeout(openTimerRef.current);
     flushSync(() => setOpen(false));
     if (shouldMoveAfterCommit && onSuggestionCommit) {
-      onSuggestionCommit(nextValue);
+      onSuggestionCommit(nextValue, { commit: true });
       return;
     }
-    onChange(nextValue);
+    onChange(nextValue, { commit: true, source: "suggestion" });
     window.setTimeout(() => {
       inputRef.current?.focus?.();
       if (typeof inputRef.current?.setSelectionRange === "function") {
@@ -17461,6 +17632,13 @@ function StatusVariantApp() {
   useDesktopPasswordRecovery(setPasswordRecoveryOpen, setMessage, setCurrentUser);
   const pdfJobRef = useRef(null);
   const reportLogoSrc = appearance.reportLogoDataUrl || loadingLogo;
+
+  useSupabaseDataSync(currentUser, async () => {
+    const next = await loadData();
+    setData(next);
+    setSelectedOrderKey((current) => next.orders?.some((order) => statusVariantOrderKey(order) === current) ? current : "");
+    setPreviewStatusReport(null);
+  });
 
   useEffect(() => {
     applyAppearanceSettings(appearance);

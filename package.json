@@ -1,6 +1,6 @@
 {
   "name": "yd-glass-manager",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Glass Orders, Suppliers & Manufacturing",
   "author": "Yasser Diab",
   "private": true,
@@ -11,12 +11,12 @@
     "local:server": "node server/index.mjs",
     "build:web": "vite build --mode full --emptyOutDir --outDir dist",
     "build:status": "vite build --mode status --emptyOutDir --outDir dist-status",
-    "dist:win": "npm run build:web && electron-builder --win nsis",
+    "dist:win": "npm run build:web && electron-builder --win nsis --config.directories.output=dist-installer/v0.1.14",
     "android:add": "cap add android",
     "android:sync": "npm run build:web && cap sync android",
     "android:sync:full": "npm run build:web && cap sync android",
     "android:sync:status": "npm run build:status && powershell -ExecutionPolicy Bypass -File scripts/sync_android_status_assets.ps1",
-    "android:debug": "npm run android:sync && powershell -ExecutionPolicy Bypass -File scripts/build_android_debug.ps1",
+    "android:debug": "npm run build:web && powershell -ExecutionPolicy Bypass -File scripts/sync_android_full_assets.ps1 && powershell -ExecutionPolicy Bypass -File scripts/build_android_debug.ps1",
     "android:release": "powershell -ExecutionPolicy Bypass -File scripts/build_android_release.ps1",
     "brand:assets": "electron scripts/generate_brand_assets.cjs",
     "test": "node --test tests/*.test.mjs",
@@ -82,10 +82,13 @@
         "from": "telegram_excel_bot",
         "to": "telegram_excel_bot",
         "filter": [
-          ".env",
           "Cairo-Regular.ttf",
           "طلب شراء زجاج.xlsm"
         ]
+      },
+      {
+        "from": "telegram_excel_bot/.env",
+        "to": "telegram_excel_bot/.env"
       },
       {
         "from": "telegram_excel_bot/طلب شراء زجاج.xlsm",

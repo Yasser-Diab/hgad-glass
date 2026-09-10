@@ -617,6 +617,7 @@ function statusButtonsForOrder(chatId, threadId, order = {}) {
         orderNo: displayOrderNo(order.order_no),
         documentId: String(order.document_id || ""),
         status: action.status,
+        statusRevision: Math.max(0, Math.trunc(numberValue(order.status_revision))),
         expiresAt: Date.now() + (10 * 60 * 1000)
       });
       return [callbackButton(action.label, `status:${token}:${action.status}`)];
@@ -653,8 +654,8 @@ async function updateSupabaseOrderStatus(pending) {
     p_order_id: pending.orderId,
     p_document_id: pending.documentId || null,
     p_status: pending.status,
-    p_app_version: "0.1.13",
-    p_client_type: "telegram_bot"
+    p_app_version: "0.1.14",
+    p_client_type: `telegram_bot|status_revision=${Math.max(0, Math.trunc(numberValue(pending.statusRevision)))}`
   });
   if (result.error) throw result.error;
   return result.data;
